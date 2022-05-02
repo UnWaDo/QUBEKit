@@ -44,10 +44,20 @@ def call_qcengine(
         model=qc_spec.qc_model,
         keywords=keywords,
     )
-
-    result = qcng.compute(
-        task, qc_spec.program, local_options=local_options.local_options
-    )
+    if qc_spec.precalc_log is not None:
+        program = qcng.get_program(name=qc_spec.program)
+        outfiles = {}
+        for name in qc_spec.precalc_log:
+            with open(qc_spec.precalc_log[name], 'r') as f:
+                outfiles[name] = f.read()
+        result = program.parse_output(
+            outfiles=outfiles,
+            input_model=task
+        )
+    else:
+        result = qcng.compute(
+            task, qc_spec.program, local_options=local_options.local_options
+        )
     with open("qcengine_result.json", "w") as output:
         output.write(result.json())
 

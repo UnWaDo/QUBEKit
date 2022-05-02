@@ -3,6 +3,7 @@
 """
 A class which handles general geometry optimisation tasks.
 """
+from ast import keyword
 import copy
 from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Union
 
@@ -140,17 +141,34 @@ class GeometryOptimiser(SchemaBase):
         optimiser_keywords = self._build_optimiser_keywords(program=qc_spec.program)
         if extras is not None:
             optimiser_keywords.update(extras)
-        opt_task = qcel.models.OptimizationInput(
-            initial_molecule=initial_mol,
-            input_specification=specification,
-            keywords=optimiser_keywords,
-        )
-        opt_result = qcng.compute_procedure(
-            input_data=opt_task,
-            procedure=self.optimiser,
-            raise_error=False,
-            local_options=local_options.local_options,
-        )
+        if qc_spec.precalc_log is not None:
+            task = qcel.models.AtomicInput(
+                molecule=initial_mol,
+                driver="energy",
+                model=qc_spec.qc_model,
+                keywords=optimiser_keywords
+            )
+            program = qcng.get_program(name=qc_spec.program)
+            outfiles = {}
+            for name in qc_spec.precalc_log:
+                with open(qc_spec.precalc_log[name], 'r') as f:
+                    outfiles[name] = f.read()
+            opt_result = program.parse_output(
+                outfiles=outfiles,
+                input_model=task
+            )
+        else:
+            opt_task = qcel.models.OptimizationInput(
+                initial_molecule=initial_mol,
+                input_specification=specification,
+                keywords=optimiser_keywords,
+            )
+            opt_result = qcng.compute_procedure(
+                input_data=opt_task,
+                procedure=self.optimiser,
+                raise_error=False,
+                local_options=local_options.local_options,
+            )
         # dump info to file
         result_mol = self._handle_output(molecule=molecule, opt_output=opt_result)
         # check if we can/have failed and raise the error
@@ -166,7 +184,7 @@ class GeometryOptimiser(SchemaBase):
         self,
         molecule: "Ligand",
         opt_output: Union[
-            qcel.models.OptimizationResult, qcel.models.common_models.FailedOperation
+            qcel.models.OptimizationResult, qcel.models.common_models.FailedOperation, qcel.models.results.AtomicResult
         ],
     ) -> "Ligand":
         """
@@ -189,8 +207,12 @@ class GeometryOptimiser(SchemaBase):
         with open("result.json", "w") as out:
             out.write(opt_output.json())
 
+        if not hasattr(opt_output, "trajectory"):
+            result_mol.coordinates = opt_output.molecule.geometry * constants.BOHR_TO_ANGS
+            result_mol.to_file(file_name="opt.xyz")
+            return result_mol
         # Now sort the result
-        if opt_output.success:
+        elif opt_output.success:
             # passed operation so act normal
             trajectory = [result.molecule for result in opt_output.trajectory]
         else:

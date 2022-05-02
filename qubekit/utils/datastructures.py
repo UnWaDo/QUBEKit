@@ -7,6 +7,7 @@ import qcengine as qcng
 from openff.toolkit.typing.engines.smirnoff import get_available_force_fields
 from pydantic import BaseModel, Field, PositiveInt, dataclasses, validator
 from typing_extensions import Literal
+from os.path import isfile
 
 from qubekit.utils.exceptions import SpecificationError
 
@@ -83,6 +84,10 @@ class QCOptions(SchemaBase):
     td_settings: Optional[TDSettings] = Field(
         None,
         description="Any time dependent settings that should be used during the computation. Note not all programs support this option.",
+    )
+    precalc_log: Optional[Dict[str, str]] = Field(
+        None,
+        description="Pathes to files with precalculated properties. Note that it must contain all the neccessary information"
     )
 
     @validator("program", "method")
@@ -199,6 +204,12 @@ class QCOptions(SchemaBase):
                 raise SpecificationError(
                     f"The program {self.program.lower()} does not support time-dependent calculations."
                 )
+        if self.precalc_log is not None:
+            for i in self.precalc_log.values():
+                if not isfile(i):
+                    raise SpecificationError(
+                        f"File {i} can not be located."
+                    )
 
 
 class StageBase(SchemaBase, abc.ABC):
