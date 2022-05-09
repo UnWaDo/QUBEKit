@@ -167,7 +167,12 @@ class DDECCharges(ChargeBase):
             self.solvent_settings.solver_type = "PCM"
         # get the solvent keywords
         extras = self._get_calculation_settings()
-
+        if self.precalc_log is not None:
+            return ExtractChargeData.extract_charge_data_chargemol(
+                molecule=molecule,
+                dir_path=self.precalc_log,
+                ddec_version=self.ddec_version
+            )
         result = call_qcengine(
             molecule=molecule,
             driver="energy",

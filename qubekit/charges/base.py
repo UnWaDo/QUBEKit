@@ -41,6 +41,10 @@ class ChargeBase(StageBase):
         None,
         description="The alternative Time-Dependent calculation settings that should be used in the calculation.",
     )
+    precalc_log: Optional[str] = Field(
+        None,
+        description="Path to directory with Chargemol results. Work only for Gaussian calculation."
+    )
 
     def finish_message(self, **kwargs) -> str:
         return "Charges calculated and AIM reference data stored."
