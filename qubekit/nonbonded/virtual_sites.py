@@ -61,6 +61,10 @@ class VirtualSites(StageBase):
     site_error_threshold: float = Field(
         1.0, description="The ESP error threshold to start fitting virtual sites.", gt=0
     )
+    explicit_virtual_sites: Optional[Dict[str, List[float]]] = Field(
+        None,
+        description="Coordinates of virtual sites (only one VS for an atom is possible)"
+    )
 
     # only for debugging so not exposed
     _enable_symmetry: bool = PrivateAttr(default=True)
@@ -135,7 +139,12 @@ class VirtualSites(StageBase):
         )
         self._molecule = molecule
         for atom_index, atom in enumerate(molecule.atoms):
-            if len(atom.bonds) < 4:
+            if self.explicit_virtual_sites:
+                if self.explicit_virtual_sites.get(str(atom_index + 1)):
+                    self._sample_points = self._generate_sample_points_atom(atom_index)
+                    self._no_site_esps = self._generate_esp_atom(atom_index)
+                    self._fit_explicit(atom_index)
+            elif len(atom.bonds) < 4:
                 self._sample_points = self._generate_sample_points_atom(atom_index)
                 self._no_site_esps = self._generate_esp_atom(atom_index)
                 self._fit(atom_index)
@@ -855,6 +864,36 @@ class VirtualSites(StageBase):
                         (site_b_coords, q_b, atom_index),
                     ]
         return error, two_site_coords
+
+    def _fit_explicit(self, atom_index: int):
+        # Calc error in esp when no sites are present
+        vec = self._get_vector_from_coords(atom_index, n_sites=1)
+        no_site_error = self._one_site_objective_function((0, 1), atom_index, vec)
+        no_site_error /= len(self._sample_points)
+
+        if self.explicit_virtual_sites.get(str(atom_index + 1)) is None:
+            return
+        vec = np.array(self.explicit_virtual_sites[str(atom_index + 1)]) - self._coords[atom_index]
+        bounds = ((-1.0, 1.0), (1.0, 1.0))
+        one_site_fit = minimize(
+            self._one_site_objective_function,
+            np.array([0, 1]),
+            args=(atom_index, vec),
+            bounds=bounds,
+        )
+        one_site_error = one_site_fit.fun / len(self._sample_points)
+        q, _ = one_site_fit.x
+        one_site_coords = [(vec + self._coords[atom_index], q, atom_index)]
+
+        with open("site_results.txt", "a+") as site_file:
+            site_file.write(
+                f"For atom {self._molecule.atoms[atom_index].atom_name} explicit virtual site has been given\n"
+                f"No site error: {no_site_error: .4f}    Explicit site error: {one_site_error}\n"
+            )
+            self._v_sites_coords.extend(one_site_coords)
+            self._molecule.NonbondedForce[(atom_index,)].charge -= decimal.Decimal(
+                one_site_coords[0][1]
+            )
 
     def _fit(self, atom_index: int):
         """
