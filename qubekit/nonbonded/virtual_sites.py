@@ -20,6 +20,7 @@ from mpl_toolkits.mplot3d import Axes3D
 from pydantic import Field, PrivateAttr
 from scipy.optimize import minimize
 from typing_extensions import Literal
+import qubekit.nonbonded.resp as resp
 
 from qubekit.utils.constants import (
     ANGS_TO_NM,
@@ -35,6 +36,7 @@ from qubekit.utils.datastructures import StageBase
 if TYPE_CHECKING:
     from qubekit.molecules import Ligand
 
+bohr_to_angstrom = 0.52917721092
 
 class VirtualSites(StageBase):
     """
@@ -61,9 +63,12 @@ class VirtualSites(StageBase):
     site_error_threshold: float = Field(
         1.0, description="The ESP error threshold to start fitting virtual sites.", gt=0
     )
-    explicit_virtual_sites: Optional[Dict[str, List[float]]] = Field(
+    esp_file: Optional[str] = Field(
+        None, description="File with reference point coordinates and esp value at them: x y z q"
+    )
+    explicit_virtual_sites: Optional[List[Tuple[int, List[float]]]] = Field(
         None,
-        description="Coordinates of virtual sites (only one VS for an atom is possible)"
+        description="Coordinates of virtual sites and atoms they are attached to"
     )
 
     # only for debugging so not exposed
@@ -138,13 +143,14 @@ class VirtualSites(StageBase):
             else molecule.coordinates
         )
         self._molecule = molecule
+        if self.explicit_virtual_sites:
+            self._resp_charges(molecule)
+            self._save_virtual_sites()
+            self._write_xyz()
+            self._clear_cache()
+            return molecule
         for atom_index, atom in enumerate(molecule.atoms):
-            if self.explicit_virtual_sites:
-                if self.explicit_virtual_sites.get(str(atom_index + 1)):
-                    self._sample_points = self._generate_sample_points_atom(atom_index)
-                    self._no_site_esps = self._generate_esp_atom(atom_index)
-                    self._fit_explicit(atom_index)
-            elif len(atom.bonds) < 4:
+            if len(atom.bonds) < 4:
                 self._sample_points = self._generate_sample_points_atom(atom_index)
                 self._no_site_esps = self._generate_esp_atom(atom_index)
                 self._fit(atom_index)
@@ -159,6 +165,48 @@ class VirtualSites(StageBase):
         # clear any cache variables
         self._clear_cache()
 
+        return molecule
+    
+    def _resp_charges(self, molecule: "Ligand") -> "Ligand":
+        molecule.extra_sites.clear_sites()
+        sample_points = np.loadtxt(self.esp_file, skiprows=1)
+        esps = sample_points[:,3]
+        sample_points = sample_points[:,:-1] * bohr_to_angstrom
+        options = {
+            'WEIGHT': [1],
+            'RESTRAINT': True,
+            'RESP_A': 0.0005,
+            'RESP_B': 0.1,
+            'IHFREE': True,
+            'TOLER': 1e-5,
+            'MAX_IT': 25,
+            'CONSTRAINT_CHARGE': [],
+            'CONSTRAINT_GROUP': []
+        }
+        coordinates = self._coords
+        data = {
+            'natoms': len(molecule.atoms) + len(self.explicit_virtual_sites),
+            'symbols': [a.atomic_symbol for a in molecule.atoms],
+            'mol_charge': 0,
+            'coordinates': [coordinates],
+            'esp_values': [esps]
+        }
+        for c in self.explicit_virtual_sites:
+            coordinates = np.vstack([coordinates, c[1]])
+            data['symbols'].append('X')
+        invr = np.zeros((len(sample_points), len(coordinates)))
+        for i in range(invr.shape[0]):
+            for j in range(invr.shape[1]):
+                invr[i, j] = 1/np.linalg.norm(sample_points[i]-coordinates[j])
+        data['invr'] = [invr * bohr_to_angstrom] # convert to atomic units
+        data['coordinates'] = [coordinates / bohr_to_angstrom]
+        qf, labelf, note = resp.fit(options, data)
+        for i, c in enumerate(self.explicit_virtual_sites):
+            self._v_sites_coords.extend([(c[1], qf[1][i + len(molecule.atoms)], c[0] - 1)])
+
+        for i in range(self._molecule.n_atoms):
+            self._molecule.atoms[i].aim.charge = qf[1][i]
+            self._molecule.NonbondedForce[(i,)].charge = qf[1][i]
         return molecule
 
     def _clear_cache(self):

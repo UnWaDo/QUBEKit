@@ -11,3 +11,5 @@ VEHICLe
 *.csv
 *.dat
 !qubekit/tests/files/*
+__pycache__
+test
