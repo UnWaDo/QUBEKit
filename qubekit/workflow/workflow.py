@@ -8,6 +8,7 @@ from typing_extensions import Literal
 import qubekit
 from qubekit.bonded import ModSeminario, QForceHessianFitting
 from qubekit.charges import DDECCharges, MBISCharges
+from qubekit.fragmentation import WBOFragmentation
 from qubekit.molecules import Ligand
 from qubekit.nonbonded import LennardJones612, VirtualSites, get_protocol
 from qubekit.parametrisation import XML, AnteChamber, OpenFF
@@ -20,7 +21,6 @@ from qubekit.workflow.results import StageResult, Status, WorkFlowResult
 
 
 class WorkFlow(SchemaBase):
-
     type: Literal["WorkFlow"] = "WorkFlow"
     qc_options: QCOptions = Field(
         QCOptions(),
@@ -29,6 +29,10 @@ class WorkFlow(SchemaBase):
     local_resources: LocalResource = Field(
         LocalResource(),
         description="The local resource options for the workflow like total memory and cores available.",
+    )
+    fragmentation: Optional[WBOFragmentation] = Field(
+        WBOFragmentation(),
+        description="The fragmentation method which should be used to speed up the torsion optimisation stage.",
     )
     parametrisation: Union[OpenFF, XML, AnteChamber] = Field(
         OpenFF(),
@@ -65,6 +69,19 @@ class WorkFlow(SchemaBase):
     hessian: ClassVar[Hessian] = Hessian()
 
     _results_fname: str = PrivateAttr("workflow_result.json")
+
+    _default_workflow: ClassVar[List[str]] = [
+        "fragmentation",
+        "parametrisation",
+        "optimisation",
+        "hessian",
+        "charges",
+        "virtual_sites",
+        "non_bonded",
+        "bonded_parameters",
+        "torsion_scanner",
+        "torsion_optimisation",
+    ]
 
     @classmethod
     def from_results(cls, results: WorkFlowResult):
@@ -137,17 +154,8 @@ class WorkFlow(SchemaBase):
         Returns:
             A list of stage names in the order they will be ran in.
         """
-        normal_workflow = [
-            "parametrisation",
-            "optimisation",
-            "hessian",
-            "charges",
-            "virtual_sites",
-            "non_bonded",
-            "bonded_parameters",
-            "torsion_scanner",
-            "torsion_optimisation",
-        ]
+        normal_workflow = cls._default_workflow.copy()
+
         if skip_stages is not None:
             for stage in skip_stages:
                 try:
@@ -196,12 +204,19 @@ class WorkFlow(SchemaBase):
         """
         Add any optional stages which are skipped when not supplied, to the skip stages list.
         """
-        if self.virtual_sites is None and skip_stages is not None:
-            # we get a tuple from click so we can not append
-            return [*skip_stages, "virtual_sites"]
 
-        elif self.virtual_sites is None and skip_stages is None:
-            return ["virtual_sites"]
+        optional_stages = []
+        for stage_name in self._default_workflow:
+            stage = getattr(self, stage_name)
+            if stage is None:
+                optional_stages.append(stage_name)
+
+        if optional_stages and skip_stages is not None:
+            # we get a tuple from click so we can not append
+            return [*skip_stages, *optional_stages]
+
+        elif optional_stages and skip_stages is None:
+            return [*optional_stages]
 
         return skip_stages
 
@@ -291,23 +306,21 @@ class WorkFlow(SchemaBase):
         for field in workflow:
             stage: StageBase = getattr(self, field)
             # some stages print based on what spec they are using
-            print(stage.start_message(qc_spec=self.qc_options))
+            print(stage.start_message(qc_spec=self.qc_options, molecule=molecule))
             molecule = self._run_stage(
                 stage_name=field, stage=stage, molecule=molecule, results=results
             )
-            print(stage.finish_message())
+            print(stage.finish_message(molecule=molecule))
 
         # now the workflow has finished
         # write final results
         results.to_file(filename=self._results_fname)
         # write out final parameters
         with folder_setup("final_parameters"):
-            # if we have U-B terms we need to write a non-standard pdb file
-            if molecule.has_ub_terms():
-                molecule._to_ub_pdb()
-            else:
-                molecule.to_file(file_name=f"{molecule.name}.pdb")
+            molecule.to_file(file_name=f"{molecule.name}.pdb")
             molecule.write_parameters(file_name=f"{molecule.name}.xml")
+            # write out the offxml with h-bond constraints
+            molecule.to_offxml(file_name=f"{molecule.name}.offxml", h_constraints=True)
 
         return results
 

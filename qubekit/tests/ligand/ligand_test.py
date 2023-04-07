@@ -7,9 +7,8 @@ import networkx as nx
 import numpy as np
 import pytest
 from openff.toolkit.topology import Molecule as OFFMolecule
+from openmm import unit
 from rdkit.Chem import rdMolTransforms
-from rdkit.Chem.rdchem import AtomValenceException
-from simtk import unit
 
 from qubekit.charges import ExtractChargeData
 from qubekit.molecules import Ligand
@@ -37,6 +36,14 @@ def test_generate_conformers(acetone):
     conformers = acetone.generate_conformers(n_conformers=4)
     # make sure we do not lose the input conformer
     assert np.allclose(input_coords, conformers[0])
+
+
+def test_equal(acetone):
+    """Make sure we can tell molecules are the same using a simple smiles comparison"""
+    cco = Ligand.from_smiles("CCO", "ethanol")
+    occ = Ligand.from_smiles("OCC", "ethanol_revser")
+    assert occ == cco
+    assert occ != acetone
 
 
 def test_make_unique_names():
@@ -294,7 +301,7 @@ def test_to_openmm_coords(acetone):
     assert np.allclose(coords.in_units_of(unit.angstrom), acetone.coordinates)
 
 
-def test_has_ub_terms(acetone):
+def test_has_ub_terms(acetone, openff):
     """
     Make sure we can correctly determine when there are ub terms
     """
@@ -302,42 +309,9 @@ def test_has_ub_terms(acetone):
     assert acetone.has_ub_terms() is False
     # now add a fake terms
     for angle in acetone.angles:
-        acetone.BondForce.create_parameter(atoms=(angle[0], angle[2]), k=1, length=2)
+        acetone.UreyBradleyForce.create_parameter(atoms=angle, k=1, d=2)
 
     assert acetone.has_ub_terms() is True
-
-
-def test_openmm_topology_ub(acetone):
-    """
-    Make sure ub connections are added to a openmm topology when present.
-    """
-    openmm_top_no_ub = acetone.to_openmm_topology()
-    # now add fake ub terms
-    for angle in acetone.angles:
-        acetone.BondForce.create_parameter(atoms=(angle[0], angle[2]), k=1, length=2)
-    openmm_top_ub = acetone.to_openmm_topology()
-    assert openmm_top_ub.getNumBonds() > openmm_top_no_ub.getNumBonds()
-    assert openmm_top_ub.getNumAtoms() == openmm_top_no_ub.getNumAtoms()
-
-
-def test_ub_pdb(acetone, tmpdir):
-    """
-    Make sure we can write pdb files which have the ub connections.
-    """
-    with tmpdir.as_cwd():
-        # add fake ub terms
-        for angle in acetone.angles:
-            acetone.BondForce.create_parameter(
-                atoms=(angle[0], angle[2]), k=1, length=2
-            )
-        # write out the pdb file
-        acetone._to_ub_pdb()
-        # try and read in the malformed pdb with extra connections
-        with pytest.raises(
-            AtomValenceException,
-            match="Explicit valence for atom # 0 C, 6, is greater than permitted",
-        ):
-            _ = Ligand.from_file("acetone.pdb")
 
 
 @pytest.mark.parametrize(
@@ -780,6 +754,20 @@ def test_find_rotatable_bonds_indices_of_bonds():
     expected_bonds = [(12, 13), (5, 13)]
     for bond in bonds:
         assert bond in expected_bonds or tuple(reversed(bond)) in expected_bonds
+
+
+def test_no_rotatable_bonds(water):
+    assert 0 == water.n_rotatable_bonds
+
+
+def test_n_rotatable_bonds(methanol):
+    assert 1 == methanol.n_rotatable_bonds
+
+
+def test_measure_no_angles():
+    mol = Ligand.from_smiles("Br", "BrH")
+    assert mol.measure_angles() is None
+    assert not mol.angle_types
 
 
 def test_atom_setup():

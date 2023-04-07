@@ -15,6 +15,7 @@ from typing_extensions import Literal
 from qubekit.molecules import Ligand
 from qubekit.utils import constants
 from qubekit.utils.datastructures import StageBase
+from qubekit.utils.file_handling import folder_setup
 
 
 class ModSemMaths:
@@ -55,7 +56,6 @@ class ModSemMaths:
 
     @staticmethod
     def dot_product(u_pa, eig_ab):
-
         return sum(u_pa[i] * eig_ab[i].conjugate() for i in range(3))
 
     @staticmethod
@@ -158,7 +158,6 @@ class ModSemMaths:
         k_theta_array = np.zeros(n_samples)
 
         for theta in range(n_samples):
-
             u_n = [
                 np.sin(theta) * np.cos(theta),
                 np.sin(theta) * np.sin(theta),
@@ -191,7 +190,6 @@ class ModSemMaths:
 
 
 class ModSeminario(StageBase):
-
     type: Literal["ModSeminario"] = "ModSeminario"
     vibrational_scaling: float = Field(
         1.0,
@@ -209,7 +207,7 @@ class ModSeminario(StageBase):
     def finish_message(self, **kwargs) -> str:
         return "Bond and angle parameters calculated."
 
-    def run(self, molecule: Ligand, **kwargs) -> Ligand:
+    def _run(self, molecule: Ligand, *args, **kwargs) -> Ligand:
         """
         The main worker stage which takes the molecule and its hessian and calculates the modified seminario method.
 
@@ -220,17 +218,18 @@ class ModSeminario(StageBase):
             Please cite this method using <J. Chem. Theory Comput. (2018), doi:10.1021/acs.jctc.7b00785>
         """
 
-        # reset the bond and angle parameter groups
-        molecule.BondForce.clear_parameters()
-        molecule.AngleForce.clear_parameters()
-        # convert the hessian from atomic units
-        conversion = constants.HA_TO_KCAL_P_MOL / (constants.BOHR_TO_ANGS**2)
-        # make sure we do not change the molecule hessian
-        hessian = copy.deepcopy(molecule.hessian)
-        hessian *= conversion
-        self._modified_seminario_method(molecule=molecule, hessian=hessian)
-        # apply symmetry to the bond and angle parameters
-        molecule.symmetrise_bonded_parameters()
+        with folder_setup(molecule.name):
+            # reset the bond and angle parameter groups
+            molecule.BondForce.clear_parameters()
+            molecule.AngleForce.clear_parameters()
+            # convert the hessian from atomic units
+            conversion = constants.HA_TO_KCAL_P_MOL / (constants.BOHR_TO_ANGS**2)
+            # make sure we do not change the molecule hessian
+            hessian = copy.deepcopy(molecule.hessian)
+            hessian *= conversion
+            self._modified_seminario_method(molecule=molecule, hessian=hessian)
+            # apply symmetry to the bond and angle parameters
+            molecule.symmetrise_bonded_parameters()
 
         return molecule
 
@@ -261,7 +260,9 @@ class ModSeminario(StageBase):
 
         # The bond and angle values are calculated and written to file.
         self.calculate_bonds(eigenvals, eigenvecs, molecule, bond_lens)
-        self.calculate_angles(eigenvals, eigenvecs, molecule, bond_lens)
+        if molecule.n_angles > 0:
+            # handle linear molecules with no angles
+            self.calculate_angles(eigenvals, eigenvecs, molecule, bond_lens)
         return molecule
 
     def calculate_angles(
@@ -374,9 +375,7 @@ class ModSeminario(StageBase):
         conversion = constants.KCAL_TO_KJ * 2
 
         with open("Modified_Seminario_Angles.txt", "w") as angle_file:
-
             for i, angle in enumerate(molecule.angles):
-
                 scalings = scaling_factors_angles_list[i]
 
                 # Ensures that there is no difference when the ordering is changed.
@@ -430,7 +429,6 @@ class ModSeminario(StageBase):
         k_b, bond_len_list = np.zeros(len(bonds)), np.zeros(len(bonds))
 
         with open("Modified_Seminario_Bonds.txt", "w") as bond_file:
-
             for pos, bond in enumerate(bonds):
                 ab = ModSemMaths.force_constant_bond(
                     bond, eigenvals, eigenvecs, molecule.coordinates

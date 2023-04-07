@@ -49,10 +49,10 @@ def test_generate_atom_types(acetone, openff, tmpdir):
         assert atom_types == {
             "lj_types": ["C1", "C2", "O3", "C1", "H0", "H0", "H0", "H0", "H0", "H0"],
             "atom_types": {
-                "C1": (0.3399669508423535, 0.4577296),
-                "C2": (0.3399669508423535, 0.359824),
-                "O3": (0.2959921901149463, 0.87864),
-                "H0": (0.2649532787749369, 0.06568879999999999),
+                "C1": (0.3379531761626621, 0.45538911611061844),
+                "C2": (0.3480646886945065, 0.3635030558377792),
+                "O3": (0.30398122050658094, 0.8795023257036865),
+                "H0": (0.2644543413268125, 0.06602135607582665),
             },
         }
 
@@ -72,8 +72,25 @@ def test_coumarin_run(tmpdir, coumarin):
         qf.run(coumarin)
         assert coumarin.BondForce.n_parameters == coumarin.n_bonds
         assert coumarin.AngleForce.n_parameters == coumarin.n_angles
-        assert coumarin.TorsionForce.n_parameters == 45
+        assert coumarin.UreyBradleyForce.n_parameters == 0
+        assert coumarin.TorsionForce.n_parameters == 50
         assert coumarin.RBTorsionForce.n_parameters == 6
+
+
+def test_coumarin_ub_run(tmpdir, coumarin):
+    """Test running QForce on coumarin and extracting the Urey-Bradley terms"""
+    try:
+        QForceHessianFitting.is_available()
+    except ModuleNotFoundError:
+        pytest.skip("QForce is not available skipping test.")
+
+    with tmpdir.as_cwd():
+        qf = QForceHessianFitting(use_urey_bradley=True)
+        qf.run(coumarin)
+        assert coumarin.BondForce.n_parameters == coumarin.n_bonds
+        assert coumarin.AngleForce.n_parameters == coumarin.n_angles
+        assert coumarin.has_ub_terms() is True
+        assert coumarin.UreyBradleyForce.n_parameters == coumarin.n_angles
 
 
 def test_messages():

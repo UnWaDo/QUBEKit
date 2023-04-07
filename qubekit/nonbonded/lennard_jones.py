@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import math
-import os
 from typing import TYPE_CHECKING, Dict, Tuple
 
 from pydantic import Field
@@ -16,7 +15,6 @@ if TYPE_CHECKING:
 
 
 class LennardJones612(StageBase):
-
     type: Literal["LennardJones612"] = "LennardJones612"
     lj_on_polar_h: bool = Field(
         True,
@@ -68,41 +66,7 @@ class LennardJones612(StageBase):
                 "Please supply Rfree data for polar hydrogen using the symbol X is `lj_on_polar_h` is True"
             )
 
-    def extract_rfrees(self):
-        """
-        Open any .out files from ForceBalance and read in the relevant parameters.
-        Parameters are taken from the "Final physical parameters" section and stored
-        to be used in the proceeding LJ calculations.
-        """
-        # TODO remove this method and use Rfree in the config
-        for file in os.listdir("../../"):
-            if file.endswith(".out"):
-                with open(f"../../{file}") as opt_file:
-                    lines = opt_file.readlines()
-                    for i, line in enumerate(lines):
-                        if "Final physical parameters" in line:
-                            lines = lines[i:]
-                            break
-                    else:
-                        # don't raise an error if we search a random output file
-                        print(
-                            f"Could not find final parameters in ForceBalance file {file}."
-                        )
-                for line in lines:
-                    for k, v in self.free_parameters.items():
-                        if f"{k}Element" in line:
-                            self.free_parameters[k] = FreeParams(
-                                v.v_free, v.b_free, float(line.split(" ")[6])
-                            )
-                            print(f"Updated {k}free parameter from ForceBalance file.")
-                    if "xalpha" in line:
-                        self.alpha = float(line.split(" ")[6])
-                        print("Updated alpha parameter from ForceBalance file.")
-                    elif "xbeta" in line:
-                        self.beta = float(line.split(" ")[6])
-                        print("Updated beta parameter from ForceBalance file.")
-
-    def run(self, molecule: "Ligand", **kwargs) -> "Ligand":
+    def _run(self, molecule: "Ligand", **kwargs) -> "Ligand":
         """
         Use the reference AIM data in the molecule to calculate the Non-bonded (non-electrostatic) terms for the forcefield.
         * Calculates the a_i, b_i and r_aim values.
@@ -112,8 +76,6 @@ class LennardJones612(StageBase):
         """
 
         self.check_element_coverage(molecule=molecule)
-
-        self.extract_rfrees()
 
         # Calculate initial a_is and b_is
         lj_data = self._calculate_lj_data(molecule=molecule)
@@ -156,11 +118,15 @@ class LennardJones612(StageBase):
                 # Find polar Hydrogens and allocate their new name: X
                 if atomic_symbol == "H":
                     bonded_index = atom.bonds[0]
-                    if molecule.atoms[bonded_index].atomic_symbol in [
-                        "N",
-                        "O",
-                        "S",
-                    ]:
+                    if (
+                        molecule.atoms[bonded_index].atomic_symbol
+                        in [
+                            "N",
+                            "O",
+                            "S",
+                        ]
+                        and self.lj_on_polar_h
+                    ):
                         atomic_symbol = "X"
 
                 # r_aim = r_free * ((vol / v_free) ** (1 / 3))
@@ -169,8 +135,13 @@ class LennardJones612(StageBase):
                 )
 
                 # b_i = bfree * ((vol / v_free) ** 2)
-                b_i = self.free_parameters[atomic_symbol].b_free * (
-                    (atom_vol / self.free_parameters[atomic_symbol].v_free) ** 2
+                b_i = (
+                    self.free_parameters[atomic_symbol].b_free
+                    * self.alpha
+                    * (
+                        (atom_vol / self.free_parameters[atomic_symbol].v_free)
+                        ** (2 + self.beta)
+                    )
                 )
 
                 a_i = 32 * b_i * (r_aim**6)
@@ -276,10 +247,10 @@ class LennardJones612(StageBase):
                 epsilon = (lj_datum.b_i * lj_datum.b_i) / (4 * lj_datum.a_i)
 
                 # alpha and beta
-                epsilon *= self.alpha * (
-                    (atom.aim.volume / self.free_parameters[atom.atomic_symbol].v_free)
-                    ** self.beta
-                )
+                # epsilon *= self.alpha * (
+                #     (atom.aim.volume / self.free_parameters[atom.atomic_symbol].v_free)
+                #     ** self.beta
+                # )
                 epsilon *= constants.EPSILON_CONVERSION
 
             non_bonded_forces[atom.atom_index] = (sigma, epsilon)

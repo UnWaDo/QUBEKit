@@ -15,7 +15,7 @@ penalty_type {{ penalty_type }}
 jobtype {{ job_type }}
 
 # (list) The names of force fields, corresponding to directory forcefields/file_name.(itp|gen)
-forcefield bespoke.xml
+forcefield bespoke.offxml
 
 # (int) Maximum number of steps in an optimization
 maxstep {{max_iterations}}
@@ -55,6 +55,12 @@ normalize_weights {{normalize_weights}}
 # Charge constraints are taken care of using "evals".
 constrain_charge false
 
+{%- if asynchronous %}
+wq_port {{ wq_port }}
+asynchronous true
+{% endif %}
+
+
 priors
    {%- for key, value in priors.items() %}
    {{ key }} :  {{ value }}
@@ -71,6 +77,9 @@ type {{target}}
 {%- for key, value in target_options[target].items() %}
 {{key}} {{ value if value is not none else "" }}
 {%- endfor %}
+{%- if asynchronous %}
+remote true
+{% endif %}
 $end
 {%- endfor %}
 {%- endfor %}

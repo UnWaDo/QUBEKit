@@ -32,6 +32,7 @@ from qubekit.utils.constants import (
     VACUUM_PERMITTIVITY,
 )
 from qubekit.utils.datastructures import StageBase
+from qubekit.utils.file_handling import folder_setup
 
 if TYPE_CHECKING:
     from qubekit.molecules import Ligand
@@ -69,6 +70,15 @@ class VirtualSites(StageBase):
     explicit_virtual_sites: Optional[List[Tuple[int, List[float]]]] = Field(
         None,
         description="Coordinates of virtual sites and atoms they are attached to"
+    )
+    freeze_site_angles: bool = Field(
+        True,
+        description="If the angle between 2 sites should be held fix if ``True`` or optimised during fitting ``False``.",
+    )
+
+    regularisation_epsilon: float = Field(
+        0.0,
+        description="The regularisation constraining the distance between the virtual site to the parent atom.",
     )
 
     # only for debugging so not exposed
@@ -121,7 +131,7 @@ class VirtualSites(StageBase):
     def finish_message(self, **kwargs) -> str:
         return "Virtual sites optimised and saved."
 
-    def run(self, molecule: "Ligand", **kwargs) -> "Ligand":
+    def _run(self, molecule: "Ligand", *args, **kwargs) -> "Ligand":
         """
         Using the aim reference data stored in the ligand calculate virtual sites and add them to the ligand.
         Main worker method.
@@ -129,11 +139,13 @@ class VirtualSites(StageBase):
         Fit the ESP accordingly and store v-sites if they improve error.
         If any v-sites are found to be useful, write them to an xyz and store them in the Ligand object
         """
-        # remove any old sites
-        molecule.extra_sites.clear_sites()
-        for i in range(molecule.n_atoms):
-            atom = molecule.atoms[i]
-            molecule.NonbondedForce[(i,)].charge = atom.aim.charge
+
+        with folder_setup(molecule.name):
+            # remove any old sites
+            molecule.extra_sites.clear_sites()
+            for i in range(molecule.n_atoms):
+                atom = molecule.atoms[i]
+                molecule.NonbondedForce[(i,)].charge = atom.aim.charge
 
         # if we have used chargemol the dipole and quad values are for a new orientation so we must use those coords
         # else use QM
@@ -143,27 +155,21 @@ class VirtualSites(StageBase):
             else molecule.coordinates
         )
         self._molecule = molecule
-        if self.explicit_virtual_sites:
-            self._resp_charges(molecule)
-            self._save_virtual_sites()
-            self._write_xyz()
-            self._clear_cache()
-            return molecule
         for atom_index, atom in enumerate(molecule.atoms):
             if len(atom.bonds) < 4:
                 self._sample_points = self._generate_sample_points_atom(atom_index)
                 self._no_site_esps = self._generate_esp_atom(atom_index)
                 self._fit(atom_index)
 
-        if self._v_sites_coords:
-            self._save_virtual_sites()
+            if self._v_sites_coords:
+                self._save_virtual_sites()
 
-            self._write_xyz()
+                self._write_xyz()
 
-        self._molecule.fix_net_charge()
+            self._molecule.fix_net_charge()
 
-        # clear any cache variables
-        self._clear_cache()
+            # clear any cache variables
+            self._clear_cache()
 
         return molecule
     
@@ -694,6 +700,35 @@ class VirtualSites(StageBase):
             atom_index, q, q, site_a_coords, site_b_coords
         )
 
+    def _symm_esp_from_lambdas_and_charges_with_angles(
+        self,
+        atom_index: int,
+        q: float,
+        lama: float,
+        lamb: float,
+        vec_a: np.ndarray,
+        vec_b: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Symmetric version of the above. Charges and scale factors are the same for both virtual sites.
+        Place v-sites at the correct positions along the vectors by scaling according to the lambdas
+        calculate the esp from the atom and the v-sites.
+        :param atom_index: The index of the atom being analysed.
+        :param q: charge of v-sites a and b
+        :param lam: scale factors for vecs a and b
+        :param vec_a: vector deciding virtual site position
+        :param vec_b: vector deciding virtual site position
+        :return: Ordered list of esp values at each sample point
+        """
+
+        site_a_coords, site_b_coords = self._sites_coords_from_vecs_and_lams(
+            atom_index, lama, lamb, vec_a, vec_b
+        )
+
+        return self._generate_atom_mono_esp_three_charges(
+            atom_index, q, q, site_a_coords, site_b_coords
+        )
+
     def _one_site_objective_function(
         self, q_lam: Tuple[float, float], atom_index: int, vec: np.ndarray
     ) -> float:
@@ -702,7 +737,9 @@ class VirtualSites(StageBase):
         return the sum of differences at each sample point between the ideal ESP and the calculated ESP.
         """
         site_esps = self._esp_from_lambda_and_charge(atom_index, *q_lam, vec)
-        return sum(abs(self._no_site_esps - site_esps))
+        mean_abs_diff = np.mean(abs(self._no_site_esps - site_esps))
+        regularisation = abs(q_lam[1]) * self.regularisation_epsilon
+        return mean_abs_diff + regularisation
 
     def _two_sites_objective_function(
         self,
@@ -718,11 +755,13 @@ class VirtualSites(StageBase):
         site_esps = self._esp_from_lambdas_and_charges(
             atom_index, *qa_qb_lama_lamb, vec_a, vec_b
         )
-        return sum(abs(self._no_site_esps - site_esps))
+        mean_abs_diff = np.mean(abs(self._no_site_esps - site_esps))
+        regularisation = sum(abs(qa_qb_lama_lamb[2:])) * self.regularisation_epsilon
+        return mean_abs_diff + regularisation
 
     def _symm_two_sites_objective_function(
         self,
-        q_lam: Tuple[float, float],
+        q_lama: Tuple[float, float],
         atom_index: int,
         vec_a: np.ndarray,
         vec_b: np.ndarray,
@@ -733,9 +772,30 @@ class VirtualSites(StageBase):
         return the sum of differences at each sample point between the ideal ESP and the calculated ESP.
         """
         site_esps = self._symm_esp_from_lambdas_and_charges(
-            atom_index, *q_lam, vec_a, vec_b
+            atom_index, *q_lama, vec_a, vec_b
         )
-        return sum(abs(self._no_site_esps - site_esps))
+        mean_abs_diff = np.mean(abs(self._no_site_esps - site_esps))
+        regularisation = abs(q_lama[1]) * self.regularisation_epsilon
+        return mean_abs_diff + regularisation
+
+    def _symm_two_sites_objective_function_with_angles(
+        self,
+        q_lama_lama: Tuple[float, float, float],
+        atom_index: int,
+        vec_a: np.ndarray,
+        vec_b: np.ndarray,
+    ) -> float:
+        """
+        Add two sites with charge q along vectors vec_a, vec_b scaled by lam.
+        This is the symmetric case since the charges and scale factors are the same for each site.
+        return the sum of differences at each sample point between the ideal ESP and the calculated ESP.
+        """
+        site_esps = self._symm_esp_from_lambdas_and_charges_with_angles(
+            atom_index, *q_lama_lama, vec_a, vec_b
+        )
+        mean_abs_diff = np.mean(abs(self._no_site_esps - site_esps))
+        regularisation = sum(abs(q_lama_lama[1:])) * self.regularisation_epsilon
+        return mean_abs_diff + regularisation
 
     @staticmethod
     def _two_site_one_or_three_bond_constraint_charge(x):
@@ -764,7 +824,7 @@ class VirtualSites(StageBase):
         This constraint ensures the max scaling factor of the vectors combined is less than 1.
         NB They can then be scaled to be up to 1.5 by the scale factor.
         """
-        return 1 - x[2] ** 2 - x[3] ** 2
+        return 1 - x[1] ** 2 - x[2] ** 2
 
     @staticmethod
     def _symm_two_site_two_bond_constraint(x):
@@ -789,7 +849,7 @@ class VirtualSites(StageBase):
             args=(atom_index, vec),
             bounds=bounds,
         )
-        error = one_site_fit.fun / len(self._sample_points)
+        error = one_site_fit.fun
         q, lam = one_site_fit.x
         one_site_coords = [((vec * lam) + self._coords[atom_index], q, atom_index)]
 
@@ -836,8 +896,8 @@ class VirtualSites(StageBase):
                 bounds=bounds,
                 constraints=constraint,
             )
-            if two_site_fit.fun / len(self._sample_points) < error:
-                error = two_site_fit.fun / len(self._sample_points)
+            if two_site_fit.fun < error:
+                error = two_site_fit.fun
 
                 q_a, q_b, lam_a, lam_b = two_site_fit.x
                 site_a_coords, site_b_coords = self._sites_coords_from_vecs_and_lams(
@@ -861,7 +921,8 @@ class VirtualSites(StageBase):
             # charge, charge, lambda, lambda
             bounds = ((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))
             vec_a, vec_b = self._get_vector_from_coords(atom_index, n_sites=2, alt=alt)
-            if self._enable_symmetry:
+            # if self._enable_symmetry:
+            if self.freeze_site_angles:
                 two_site_fit = minimize(
                     self._symm_two_sites_objective_function,
                     np.array([0.0, 1.0]),
@@ -872,8 +933,8 @@ class VirtualSites(StageBase):
                         "fun": VirtualSites._symm_two_site_two_bond_constraint,
                     },
                 )
-                if (two_site_fit.fun / len(self._sample_points)) < error:
-                    error = two_site_fit.fun / len(self._sample_points)
+                if two_site_fit.fun < error:
+                    error = two_site_fit.fun
                     q, lam = two_site_fit.x
                     q_a = q_b = q
                     lam_a = lam_b = lam
@@ -889,18 +950,20 @@ class VirtualSites(StageBase):
                     ]
             else:
                 two_site_fit = minimize(
-                    self._two_sites_objective_function,
-                    np.array([0.0, 0.0, 1.0, 1.0]),
+                    self._symm_two_sites_objective_function_with_angles,
+                    np.array([0.0, 1.0, 0.0]),
                     args=(atom_index, vec_a, vec_b),
-                    bounds=bounds,
+                    bounds=bounds[:3],
                     constraints={
                         "type": "ineq",
                         "fun": VirtualSites._two_site_two_bond_constraint,
                     },
                 )
-                if (two_site_fit.fun / len(self._sample_points)) < error:
-                    error = two_site_fit.fun / len(self._sample_points)
-                    q_a, q_b, lam_a, lam_b = two_site_fit.x
+                if two_site_fit.fun < error:
+                    error = two_site_fit.fun
+                    q, lam_a, lam_b = two_site_fit.x
+                    q_a = q_b = q
+                    # lam_a = lam_b = lam
                     (
                         site_a_coords,
                         site_b_coords,
@@ -911,6 +974,31 @@ class VirtualSites(StageBase):
                         (site_a_coords, q_a, atom_index),
                         (site_b_coords, q_b, atom_index),
                     ]
+            # else:
+            #     two_site_fit = minimize(
+            #         self._two_sites_objective_function,
+            #         np.array([0.0, 0.0, 1.0, 1.0]),
+            #         args=(atom_index, vec_a, vec_b),
+            #         bounds=bounds,
+            #         constraints={
+            #             "type": "ineq",
+            #             "fun": VirtualSites._two_site_two_bond_constraint,
+            #         },
+            #     )
+            #     if (two_site_fit.fun / len(self._sample_points)) < error:
+            #         error = two_site_fit.fun / len(self._sample_points)
+            #         print(two_site_fit.x)
+            #         q_a, q_b, lam_a, lam_b = two_site_fit.x
+            #         (
+            #             site_a_coords,
+            #             site_b_coords,
+            #         ) = self._sites_coords_from_vecs_and_lams(
+            #             atom_index, lam_a, lam_b, vec_a, vec_b
+            #         )
+            #         two_site_coords = [
+            #             (site_a_coords, q_a, atom_index),
+            #             (site_b_coords, q_b, atom_index),
+            #         ]
         return error, two_site_coords
 
     def _fit_explicit(self, atom_index: int):
@@ -961,8 +1049,7 @@ class VirtualSites(StageBase):
 
         # Calc error in esp when no sites are present
         vec = self._get_vector_from_coords(atom_index, n_sites=1)
-        no_site_error = self._one_site_objective_function((0, 1), atom_index, vec)
-        no_site_error /= len(self._sample_points)
+        no_site_error = self._one_site_objective_function((0, 0), atom_index, vec)
 
         # Error in esp is sufficiently low to not require virtual sites.
         if no_site_error <= self.site_error_threshold:
@@ -979,25 +1066,37 @@ class VirtualSites(StageBase):
         }
 
         with open("site_results.txt", "a+") as site_file:
+            if (
+                no_site_error > one_site_error * self.site_error_factor
+                or no_site_error > two_site_error * self.site_error_factor
+            ):
+                if one_site_error < two_site_error * self.site_error_factor:
+                    site_file.write(
+                        f"One virtual site has been added to atom {self._molecule.atoms[atom_index].atom_name}\n"
+                        f"No site error: {site_errors[0]: .4f}    One site error: {site_errors[1]: .4f}    Two sites error: {site_errors[2]: .4f}\n"
+                    )
+                    self._v_sites_coords.extend(one_site_coords)
+                    self._molecule.NonbondedForce[
+                        (atom_index,)
+                    ].charge -= decimal.Decimal(one_site_coords[0][1])
 
-            if one_site_error < two_site_error * self.site_error_factor:
-                site_file.write(
-                    f"One virtual site has been added to atom {self._molecule.atoms[atom_index].atom_name}\n"
-                    f"No site error: {site_errors[0]: .4f}    One site error: {site_errors[1]: .4f}\n"
-                )
-                self._v_sites_coords.extend(one_site_coords)
-                self._molecule.NonbondedForce[(atom_index,)].charge -= decimal.Decimal(
-                    one_site_coords[0][1]
-                )
-
+                else:
+                    site_file.write(
+                        f"Two virtual sites have been added to atom {self._molecule.atoms[atom_index].atom_name}\n"
+                        f"No site error: {site_errors[0]: .4f}    One site error: {site_errors[1]: .4f}    Two sites error: {site_errors[2]: .4f}\n"
+                    )
+                    self._v_sites_coords.extend(two_site_coords)
+                    self._molecule.NonbondedForce[
+                        (atom_index,)
+                    ].charge -= decimal.Decimal(
+                        two_site_coords[0][1] + two_site_coords[1][1]
+                    )
             else:
                 site_file.write(
-                    f"Two virtual sites have been added to atom {self._molecule.atoms[atom_index].atom_name}\n"
-                    f"No site error: {site_errors[0]: .4f}    Two sites error: {site_errors[2]: .4f}\n"
-                )
-                self._v_sites_coords.extend(two_site_coords)
-                self._molecule.NonbondedForce[(atom_index,)].charge -= decimal.Decimal(
-                    two_site_coords[0][1] + two_site_coords[1][1]
+                    f"No virtual sites have been added to atom {self._molecule.atoms[atom_index].atom_name} as they do "
+                    f"not significantly lower the error, to change the error reduction threshold see the "
+                    f"`site_error_factor` parameter\n"
+                    f"No site error: {site_errors[0]: .4f}    One site error: {site_errors[1]: .4f}    Two sites error: {site_errors[2]: .4f}\n"
                 )
         self._plot(atom_index, site_errors, one_site_coords, two_site_coords)
 
@@ -1108,7 +1207,7 @@ class VirtualSites(StageBase):
 
         sm = ScalarMappable(norm=norm, cmap=cmap)
         sm.set_array(np.array([]))
-        cbar = fig.colorbar(sm)
+        cbar = fig.colorbar(sm, ax=two_plt)
         cbar.ax.set_title("charge")
 
         plt.tight_layout()
@@ -1145,9 +1244,11 @@ class VirtualSites(StageBase):
 
     def _save_virtual_sites(self):
         """
-        Take the v_site_coords generated and insert them into the Ligand object as molecule.extra_sites.
+        Take the v_site_coords generated and insert them into the Ligand object as molecule.extra_sites a proxy for
+        an Openmm.LocalCoordinatesSite
 
-        Uses the coordinates to generate the necessary position vectors to be used in the xml.
+        Uses the coordinates to generate the necessary position vectors to be used in the OpenMM xml format to match
+        as close as possible to the true position used for fitting.
         """
 
         # Prevent duplication of sites.
@@ -1155,7 +1256,6 @@ class VirtualSites(StageBase):
 
         topology = self._molecule.to_topology()
         for site_number, site in enumerate(self._v_sites_coords):
-
             site_data = {}
 
             site_coords, site_charge, parent = site
@@ -1173,30 +1273,85 @@ class VirtualSites(StageBase):
 
             # Get the xyz coordinates of the reference atoms
             parent_coords = self._coords[parent]
-            close_a_coords = self._coords[closest_atoms[0]]
-            close_b_coords = self._coords[closest_atoms[1]]
+            # close_a_coords = self._coords[closest_atoms[0]]
+            # close_b_coords = self._coords[closest_atoms[1]]
 
-            site_data["closest_a_index"] = closest_atoms[0]
-            site_data["closest_b_index"] = closest_atoms[1]
+            # site_data["closest_a_index"] = closest_atoms[0]
+            # site_data["closest_b_index"] = closest_atoms[1]
 
             parent_atom = self._molecule.atoms[parent]
-            if parent_atom.atomic_symbol == "N" and len(parent_atom.bonds) == 3:
-                close_c_coords = self._coords[closest_atoms[2]]
-                site_data["closest_c_index"] = closest_atoms[2]
 
-                x_dir = (
-                    (close_a_coords + close_b_coords + close_c_coords) / 3
-                ) - parent_coords
+            # workout if this is the special Amine bisecting H vector which should not use a 4 point method
+            amine_special_case = False
+            amine_hs = [
+                atom
+                for atom in parent_atom.bonds
+                if self._molecule.atoms[atom].atomic_symbol == "H"
+            ]
+            if (
+                parent_atom.atomic_symbol == "N"
+                and len(amine_hs) == 2
+                and parent in self._molecule.extra_sites.sites
+            ):
+                # Only applies to the second site created as the first is always along the normal to the plane of the
+                # other atoms connected to the N
+                amine_special_case = True
+
+            if amine_special_case:
+                # we need a special case for amines which bisects the Hs pointing to N for one of the sites
+                h_a_coords = self._coords[amine_hs[0]]
+                h_b_coords = self._coords[amine_hs[1]]
+                r_ha = parent_coords - h_a_coords
+                r_hb = parent_coords - h_b_coords
+                x_dir = r_ha + r_hb
                 x_dir /= np.linalg.norm(x_dir)
 
+                # we want to only depend on the hs
+                site_data["closest_a_index"] = amine_hs[0]
+                site_data["closest_b_index"] = amine_hs[1]
+                site_data["o_weights"] = [1.0, 0.0, 0.0]
+                site_data["x_weights"] = [1.0, -0.5, -0.5]
+                site_data["y_weights"] = [-1.0, 0.0, 1.0]
                 site_data["p2"] = 0
                 site_data["p3"] = 0
 
+            elif len(parent_atom.bonds) == 3:
+                # close_c_coords = self._coords[closest_atoms[2]]
+                site_data["closest_a_index"] = closest_atoms[0]
+                site_data["closest_b_index"] = closest_atoms[1]
+                site_data["closest_c_index"] = closest_atoms[2]
+
+                # always the same by construction
                 site_data["o_weights"] = [1.0, 0.0, 0.0, 0.0]  # SUM MUST BE 1.0
-                site_data["x_weights"] = [-1.0, 0.33333333, 0.33333333, 0.33333333]
+                site_data["p2"] = 0
+                site_data["p3"] = 0
+
+                # these weights don't matter by construction
                 site_data["y_weights"] = [1.0, -1.0, 0.0, 0.0]
 
+                # x_dir = (
+                #     (close_a_coords + close_b_coords + close_c_coords) / 3
+                # ) - parent_coords
+                # x_dir /= np.linalg.norm(x_dir)
+
+                x_dir, x_weights = self._find_4_point_x_dir(
+                    parent_index=parent,
+                    atom_indices=[closest_atoms[0], closest_atoms[1], closest_atoms[2]],
+                )
+
+                # site_data["p2"] = 0
+                # site_data["p3"] = 0
+
+                # site_data["o_weights"] = [1.0, 0.0, 0.0, 0.0]  # SUM MUST BE 1.0
+                site_data["x_weights"] = [1.0, *x_weights]
+                # site_data["y_weights"] = [1.0, -1.0, 0.0, 0.0]
+
             else:
+                close_a_coords = self._coords[closest_atoms[0]]
+                close_b_coords = self._coords[closest_atoms[1]]
+                site_data["closest_a_index"] = closest_atoms[0]
+                site_data["closest_b_index"] = closest_atoms[1]
+
                 x_dir = close_a_coords - parent_coords
                 x_dir /= np.linalg.norm(x_dir)
 
@@ -1231,3 +1386,69 @@ class VirtualSites(StageBase):
             self._molecule.extra_sites.create_site(**site_data)
 
         assert self._molecule.extra_sites.n_sites == len(self._v_sites_coords)
+
+    def _find_4_point_x_dir(
+        self, parent_index: int, atom_indices: List[int]
+    ) -> Tuple[np.array, np.array]:
+        """
+        To recreate a site that depends on 4 points in OpenMM which can invert we need to calculate the vector
+        corresponding to the projection of the parent atom onto the plane formed by the 3 bonded atoms. The bisecting
+        point must be formed by the linear combination of the 3 atoms that make the plane so we must find these weights.
+
+        Returns:
+            x_dir: np.array
+                The vector on which the sites lie on
+            weights: np.array
+                The weights used to form the projection vector
+        """
+        # find the normal to plane formed by the 3 atoms
+        atom1_index, atom2_index, atom3_index = atom_indices
+        atom1_coords, atom2_coords, atom3_coords, parent_coords = (
+            self._coords[atom1_index],
+            self._coords[atom2_index],
+            self._coords[atom3_index],
+            self._coords[parent_index],
+        )
+        # construct the same way as _get_vector_from_coords
+        normal_vec = np.cross(
+            (atom1_coords - atom2_coords), (atom3_coords - atom2_coords)
+        )
+        normal_vec /= np.linalg.norm(normal_vec)
+        # project the parent coords onto the plane
+        parent_distance = np.dot(parent_coords, normal_vec)
+        projected_point = parent_coords - parent_distance * normal_vec
+
+        def _distance_func(
+            weights: np.array,
+            atom1: np.array,
+            atom2: np.array,
+            atom3: np.array,
+            target: np.array,
+        ) -> float:
+            "A function used in the minimisation to find the weights for the projection vector"
+            bisector = np.dot(weights, [atom1, atom2, atom3])
+            return np.linalg.norm(bisector - target)
+
+        def _constraint(x: np.array) -> float:
+            "The total of the weights must add to 1"
+            return 1 - x.sum()
+
+        # find the weights which can remake the projection point
+        error = minimize(
+            _distance_func,
+            np.array([1 / 3, 1 / 3, 1 / 3]),
+            args=(atom1_coords, atom2_coords, atom3_coords, projected_point),
+            constraints={"type": "eq", "fun": _constraint},
+        )
+        assert (
+            error.fun < 1e2
+        ), f"The 4 point site could not be converted correctly to openmm format distance to position {error.fun}"
+
+        # make the openmm normal vector
+        openmm_vec = parent_coords - np.dot(
+            error.x, [atom1_coords, atom2_coords, atom3_coords]
+        )
+        openmm_vec /= np.linalg.norm(openmm_vec)
+        # times the weights by -1 so that when we construct the total
+        # vector it points towards the parent from the plane
+        return openmm_vec, -1 * error.x

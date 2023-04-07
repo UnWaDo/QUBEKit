@@ -1,7 +1,7 @@
 name: test
 channels:
+  - psi4
   - conda-forge
-  - psi4/label/dev
 dependencies:
     # Base deps
   - python
@@ -10,13 +10,17 @@ dependencies:
   # Testing
   - pytest
   - pytest-cov
-  - deepdiff
+  - deepdiff >=5.8.0
 
     # Core deps
-  - openff-toolkit-base >=0.9.2
+  - openff-toolkit-base >=0.10.7, <0.11
+  - _openmp_mutex=4.5=2_gnu #required by psi4 ie intel-openmp it seems
+  - pytorch
+  - openff-fragmenter=0.1.2
   - ambertools
   - pydantic
-  - forcebalance
+  - forcebalance=1.9.3
+  - pymbar=3.0.7
   - rdkit
   - tqdm
   - torsiondrive
@@ -30,15 +34,29 @@ dependencies:
   - qcelemental >=0.19.0
   - jinja2
   - typing-extensions
+  - pcmsolver >=1.2.1
+  - ndcctools
 
   # Optional
   - xtb-python
   - torchani
-  - psi4 =1.4a2.dev1058+670a850
-  - gau2grid =2.0.3
+  - psi4=1.5
+  - libint2=*=hc9558a2_9
   - dftd3
-  - gcp
-  - optking
+  - intel-openmp!=2019.5
+  - msgpack-python
+  - chemper
+
+#  # OpenFF-toolkit missing
+#  - openmm >=7.6
+#  - smirnoff99Frosst
+#  - openff-forcefields
+#  - mdtraj
+#  - xmltodict
+#  - packaging
+#  - python-constraint
+#  - importlib-metadata >=4.10
 
   - pip:
-      - qforce
+      - qforce==0.6.3
+#      - git+https://github.com/openforcefield/openff-toolkit.git@0-10-x

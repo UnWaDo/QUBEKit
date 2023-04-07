@@ -1,6 +1,6 @@
 from typing import TYPE_CHECKING, List, Optional
 
-from simtk.openmm import System, app
+from openmm import System, app
 from typing_extensions import Literal
 
 from qubekit.parametrisation.base_parametrisation import Parametrisation
@@ -42,3 +42,6 @@ class XMLProtein(Parametrisation):
         )
 
         return system
+
+    def run(self, molecule: "Protein", *args, **kwargs) -> "Protein":
+        return self._run(molecule, *args, **kwargs)

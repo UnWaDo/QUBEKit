@@ -113,7 +113,7 @@ class GeometryOptimiser(SchemaBase):
             qc_spec:
                 The QCOptions object which describes the program, basis and method to use.
             local_options:
-                The loacl options including cores and memory.
+                The local options including cores and memory.
             allow_fail:
                 If we should not raise an error if the molecule fails to be optimised, this will extract the last geometry
                 from the trajectory and return it.
@@ -167,7 +167,7 @@ class GeometryOptimiser(SchemaBase):
                 input_data=opt_task,
                 procedure=self.optimiser,
                 raise_error=False,
-                local_options=local_options.local_options,
+                task_config=local_options.local_options,
             )
         # dump info to file
         result_mol = self._handle_output(molecule=molecule, opt_output=opt_result)
@@ -230,9 +230,9 @@ class GeometryOptimiser(SchemaBase):
         traj = [mol.geometry * constants.BOHR_TO_ANGS for mol in trajectory]
         result_mol.coordinates = traj[-1]
         # write to file
-        result_mol.to_file(file_name="opt.xyz")
+        result_mol.to_file(file_name=f"opt_{molecule.name}.xyz")
         result_mol.to_multiconformer_file(
-            file_name="opt_trajectory.xyz", positions=traj
+            file_name=f"opt_trajectory_{molecule.name}.xyz", positions=traj
         )
 
         return result_mol

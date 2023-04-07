@@ -2,10 +2,10 @@
 Classes that help with parameter fitting using ForceBalance.
 """
 import abc
-import copy
 import os
+import socket
 import subprocess
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, PositiveFloat, PositiveInt
 from qcelemental.util import which_import
@@ -13,7 +13,7 @@ from typing_extensions import Literal
 
 from qubekit.molecules import Ligand, TorsionDriveData
 from qubekit.torsions.utils import forcebalance_setup
-from qubekit.utils.datastructures import StageBase
+from qubekit.utils.datastructures import LocalResource, StageBase
 from qubekit.utils.exceptions import ForceBalanceError, MissingReferenceData
 from qubekit.utils.file_handling import get_data, make_and_change_into
 from qubekit.utils.helpers import export_torsiondrive_data
@@ -88,13 +88,13 @@ class TargetBase(BaseModel, abc.ABC):
         return data
 
 
-class TorsionProfile(TargetBase):
+class TorsionProfileSmirnoff(TargetBase):
     """
     This helps set up the files required to perform the torsion profile fitting target in forcebalance.
     For each ligand passed the input files are prepared for each target torsion, the optimize in file is also updated with the target info.
     """
 
-    target_name: Literal["TorsionProfile_OpenMM"] = "TorsionProfile_OpenMM"
+    target_name: Literal["TorsionProfile_SMIRNOFF"] = "TorsionProfile_SMIRNOFF"
     description = "Relaxed energy and RMSD fitting for torsion drives only."
     energy_denom: PositiveFloat = Field(
         1.0,
@@ -105,14 +105,24 @@ class TorsionProfile(TargetBase):
         description="The upper limit for energy differences in kcal/mol which are included in fitting. Relative energies above this value do not contribute to the objective.",
     )
     attenuate: bool = Field(
-        False,
+        True,
         description="If the weights should be attenuated as a function of the energy above the minimum.",
     )
     restrain_k: float = Field(
         1.0,
         description="The strength of the harmonic restraint in kcal/mol used in the mm relaxation on all non-torsion atoms.",
     )
-    keywords: Dict[str, Any] = {"pdb": "molecule.pdb", "coords": "scan.xyz"}
+    keywords: Dict[str, Any] = {}
+
+    def fb_options(self) -> Dict[str, Any]:
+        data = super(TorsionProfileSmirnoff, self).fb_options()
+        # add the specific options for this target
+        data["pdb"] = "molecule.pdb"
+        # ForceBalance is able to read an .sdf even though we pass it as a mol2 file.
+        # This is a workaround not having a .mol2 writer (only OpenEye works fine now)
+        data["mol2"] = "molecule.sdf"
+        data["coords"] = "scan.xyz"
+        return data
 
     def prep_for_fitting(self, molecule: Ligand) -> List[str]:
         """
@@ -141,18 +151,14 @@ class TorsionProfile(TargetBase):
         # keep track of where we start
         base_folder = os.getcwd()
 
-        # loop over each scanned bond and make a target folder
+        # loop over each fragment and then each scanned bond and make a target folder for each
         for scan in molecule.qm_scans:
-            task_name = (
-                f"{self.target_name}_{scan.central_bond[0]}_{scan.central_bond[1]}"
-            )
+            task_name = f"{self.target_name}_{molecule.name}_{scan.central_bond[0]}_{scan.central_bond[1]}"
             target_folders.append(task_name)
             make_and_change_into(name=task_name)
-            # make the pdb topology file
-            if molecule.has_ub_terms():
-                molecule._to_ub_pdb(file_name="molecule")
-            else:
-                molecule.to_file(file_name="molecule.pdb")
+            molecule.to_file(file_name="molecule.pdb")
+            # mol2 is required for smirks
+            molecule.to_file("molecule.sdf")
             # write the qdata file
             export_torsiondrive_data(molecule=molecule, tdrive_data=scan)
             # make the metadata
@@ -228,7 +234,9 @@ class ForceBalanceFitting(StageBase):
     normalize_weights: bool = False
     extras: Dict[str, Any] = {}
     priors: Priors = Priors()
-    targets: Dict[str, TorsionProfile] = {"TorsionProfile_OpenMM": TorsionProfile()}
+    targets: Dict[str, TorsionProfileSmirnoff] = {
+        "TorsionProfile_OpenFF": TorsionProfileSmirnoff()
+    }
 
     def start_message(self, **kwargs) -> str:
         return "Performing torsion optimisations using ForceBalance."
@@ -243,18 +251,26 @@ class ForceBalanceFitting(StageBase):
             "forcebalance",
             return_bool=True,
             raise_error=True,
-            raise_msg="Please install via `conda install forcebalance -c conda-forge`.",
+            raise_msg="Please install ForceBalance via `conda install forcebalance -c conda-forge`.",
         )
         openmm = which_import(
-            ".openmm",
+            "openmm",
             return_bool=True,
             raise_error=True,
-            package="simtk",
-            raise_msg="Please install via `conda install openmm -c conda-forge`.",
+            raise_msg="Please install openmm via `conda install openmm -c conda-forge`.",
         )
-        return fb and openmm
+        cctools = which_import(
+            "work_queue",
+            return_bool=True,
+            raise_error=True,
+            raise_msg="Please install cctools via `conda install ndcctools -c conda-forge`.",
+        )
+        return fb and openmm and cctools
 
-    def run(self, molecule: "Ligand", **kwargs) -> "Ligand":
+    def run(self, molecule: "Ligand", *args, **kwargs) -> "Ligand":
+        return self._run(molecule, *args, **kwargs)
+
+    def _run(self, molecule: "Ligand", **kwargs) -> "Ligand":
         """
         The main run method of the ForceBalance torsion optimisation stage.
 
@@ -271,7 +287,9 @@ class ForceBalanceFitting(StageBase):
             )
 
         # now we have validated the data run the optimiser
-        return self._optimise(molecule=molecule)
+        return self._optimise(
+            molecule=molecule, local_options=kwargs.get("local_options", None)
+        )
 
     def add_target(self, target: TargetBase) -> None:
         """
@@ -283,7 +301,7 @@ class ForceBalanceFitting(StageBase):
         if issubclass(type(target), TargetBase):
             self.targets[target.target_name] = target
 
-    def _optimise(self, molecule: Ligand) -> Ligand:
+    def _optimise(self, molecule: Ligand, local_options=None) -> Ligand:
         """
         For the given input molecule run the forcebalance fitting for the list of targets and run time settings.
 
@@ -291,28 +309,71 @@ class ForceBalanceFitting(StageBase):
             The list of optimisation targets should be set before running.
         """
 
+        if local_options is None:
+            # set minimum defaults
+            local_options = LocalResource(cores=1, memory=2)
+
         # set up the master fitting folder
         with forcebalance_setup(folder_name="ForceBalance"):
             fitting_folder = os.getcwd()
             fitting_targets = {}
             # prep the target folders
             os.chdir("targets")
+            molecules_to_optimise = []
+            if molecule.qm_scans is not None:
+                molecules_to_optimise.append(molecule)
+            if molecule.fragments is not None:
+                molecules_to_optimise.extend(molecule.fragments)
             for target in self.targets.values():
-                target_folders = target.prep_for_fitting(molecule=molecule)
-                fitting_targets[target.target_name] = target_folders
+                for mol in molecules_to_optimise:
+                    target_folders = target.prep_for_fitting(molecule=mol)
+                    # fitting_targets[target.target_name] = target_folders
+                    if target.target_name in fitting_targets:
+                        fitting_targets[target.target_name].extend(target_folders)
+                    else:
+                        fitting_targets[target.target_name] = target_folders
 
             # back to fitting folder
             os.chdir(fitting_folder)
+            # total number of torsion targets
+            total_targets = sum(len(torsions) for torsions in fitting_targets.values())
+            # if we have 1 target only use one worker as its faster
+            max_workers = min([total_targets, local_options.cores])
+            # aysnc used for more than one target/worker only
+            use_workers = True if max_workers > 1 else False
             # now we can make the optimize in file
-            self.generate_optimise_in(target_data=fitting_targets)
+            wq_port = self.generate_optimise_in(
+                target_data=fitting_targets, use_workers=use_workers
+            )
             # now make the forcefield file
             self.generate_forcefield(molecule=molecule)
 
             # now execute forcebalance
             with open("log.txt", "w") as log:
-                subprocess.run(
-                    "ForceBalance optimize.in", shell=True, stdout=log, stderr=log
-                )
+                if use_workers:
+                    import work_queue
+
+                    workers = work_queue.Factory(
+                        "local", manager_host_port=f"localhost:{wq_port}"
+                    )
+                    # the optimisation takes space in gas, so 1 core for each OpenMM is good enough most likely
+                    workers.cores = 1
+                    # divide the memory for each worker
+                    workers.memory = local_options.memory / max_workers
+                    workers.min_workers = 1
+                    workers.max_workers = max_workers
+
+                    with workers:
+                        subprocess.run(
+                            "ForceBalance optimize.in",
+                            shell=True,
+                            stdout=log,
+                            stderr=log,
+                        )
+                else:
+                    subprocess.run(
+                        "ForceBalance optimize.in", shell=True, stdout=log, stderr=log
+                    )
 
             result_ligand = self.collect_results(molecule=molecule)
             return result_ligand
@@ -320,6 +381,7 @@ class ForceBalanceFitting(StageBase):
     def generate_forcefield(self, molecule: Ligand) -> None:
         """
         For the given molecule generate the fitting forcefield with the target torsion terms tagged with the parameterize keyword.
+        The selection of dihedrals for parameterization relies on the .fragments and their central bonds.
 
         Args:
             molecule: The molecule whose torsion parameters should be optimised.
@@ -331,75 +393,15 @@ class ForceBalanceFitting(StageBase):
             We work with a copy of the molecule here as we add attributes to the forcefield and change default values.
         """
 
-        copy_mol = copy.deepcopy(molecule)
-        # now we need to find all of the dihedrals for a central bond which should be optimised
-        for torsiondrive_data in copy_mol.qm_scans:
-            central_bond = torsiondrive_data.central_bond
-            # now we can get all dihedrals for this bond
-            try:
-                dihedrals = copy_mol.dihedrals[central_bond]
-            except KeyError:
-                dihedrals = copy_mol.dihedrals[tuple(reversed(central_bond))]
+        # the atoms in the dihedrals for parameterization have mass 0
+        # so the constraints have to be turned off
+        molecule._optimizeable_offxml(
+            file_name=os.path.join("forcefield", "bespoke.offxml"), h_constraints=False
+        )
 
-            dihedral_groups = self.group_by_symmetry(
-                molecule=copy_mol, dihedrals=dihedrals
-            )
-
-            for dihedral_group in dihedral_groups:
-                # add parametrise flags for forcebalance to one dihedral in the group
-                # the rest get parameter eval tags referenced to this master dihedral
-                master_dihedral = dihedral_group[0]
-                master_parameter = copy_mol.TorsionForce[master_dihedral]
-                # use the parameter atom order to be consistent
-                dihedral_string = ".".join(str(i) for i in master_parameter.atoms)
-                eval_tags = [
-                    f"k{i}=PARM['Proper/k{i}/{dihedral_string}']" for i in range(1, 5)
-                ]
-
-                # we need to make sure all parameters are bigger than 0 to be loaded into an OpenMM system
-                parameter_data = {"attributes": {"k1", "k2", "k3", "k4"}}
-                for k in ["k1", "k2", "k3", "k4"]:
-                    if getattr(master_parameter, k) == 0:
-                        parameter_data[k] = 1e-6
-                master_parameter.update(**parameter_data)
-
-                # now add parameter evals
-                for dihedral in dihedral_group[1:]:
-                    parameter = copy_mol.TorsionForce[dihedral]
-                    parameter.parameter_eval = eval_tags
-
-        # now we have all of the dihedrals build the force field
-        copy_mol.write_parameters(file_name=os.path.join("forcefield", "bespoke.xml"))
-
-    def group_by_symmetry(
-        self, molecule: Ligand, dihedrals: List[Tuple[int, int, int, int]]
-    ) -> List[List[Tuple[int, int, int, int]]]:
-        """
-        For a list of target dihedrals to be optimised group them by symmetry type.
-
-        Note:
-            Dihedrals not in the target bond but in the same symmetry group are also included.
-        """
-        dihedral_types = molecule.dihedral_types
-        atom_types = molecule.atom_types
-        dihedral_groups = {}
-        for dihedral in dihedrals:
-            # get the dihedral type
-            dihedral_type = "-".join(atom_types[i] for i in dihedral)
-            # now get all dihedrals of this type
-            if (
-                dihedral_type not in dihedral_groups
-                and dihedral_type[::-1] not in dihedral_groups
-            ):
-                try:
-                    dihedral_groups[dihedral_type] = dihedral_types[dihedral_type]
-                except KeyError:
-                    dihedral_groups[dihedral_type[::-1]] = dihedral_types[
-                        dihedral_type[::-1]
-                    ]
-        return list(dihedral_groups.values())
-
-    def generate_optimise_in(self, target_data: Dict[str, List[str]]) -> None:
+    def generate_optimise_in(
+        self, target_data: Dict[str, List[str]], use_workers: bool
+    ) -> Optional[int]:
         """
         For the given list of targets and entries produce an optimize.in file which contains all of the run time settings to be used in the optimization.
         this uses jinja templates to generate the required file from the template distributed with qubekit.
@@ -421,10 +423,24 @@ class ForceBalanceFitting(StageBase):
             target_options[target.target_name] = target.fb_options()
         data["target_options"] = target_options
 
+        wq_port = None
+
+        if use_workers:
+            # add the async settings
+            data["asynchronous"] = True
+            # select an empty socket and bind it
+            sock = socket.socket()
+            sock.bind(("localhost", 0))
+            wq_port = sock.getsockname()[1]
+            sock.close()
+            data["wq_port"] = wq_port
+
         rendered_template = template.render(**data)
 
         with open("optimize.in", "w") as opt_in:
             opt_in.write(rendered_template)
+
+        return wq_port
 
     @staticmethod
     def check_converged() -> bool:
@@ -468,14 +484,35 @@ class ForceBalanceFitting(StageBase):
             )
 
         else:
+            from openff.toolkit.typing.engines.smirnoff import ForceField
+            from openmm import unit
 
-            from qubekit.parametrisation import XML
-
-            # load the new parameters into the ligand
-            # xml needs a pdb file
-            xml = XML()
-            xml.run(
-                molecule=molecule,
-                input_files=[os.path.join("result", self.job_type, "bespoke.xml")],
+            optimized_ff = ForceField(
+                os.path.join("result", self.job_type, "bespoke.offxml"),
+                load_plugins=True,
+                allow_cosmetic_attributes=True,
             )
+            # only be the torsions which were updated so extract and update the parameters
+            torsion_handler = optimized_ff.get_parameter_handler("ProperTorsions")
+            for parameter in torsion_handler.parameters:
+                if parameter.attribute_is_cosmetic("parameterize"):
+                    parameter_data = {
+                        "k1": parameter.k1.value_in_unit(unit.kilojoule_per_mole),
+                        "k2": parameter.k2.value_in_unit(unit.kilojoule_per_mole),
+                        "k3": parameter.k3.value_in_unit(unit.kilojoule_per_mole),
+                        "k4": parameter.k4.value_in_unit(unit.kilojoule_per_mole),
+                        "periodicity1": parameter.periodicity1,
+                        "periodicity2": parameter.periodicity2,
+                        "periodicity3": parameter.periodicity3,
+                        "periodicity4": parameter.periodicity4,
+                        "phase1": parameter.phase1.value_in_unit(unit.radian),
+                        "phase2": parameter.phase2.value_in_unit(unit.radian),
+                        "phase3": parameter.phase3.value_in_unit(unit.radian),
+                        "phase4": parameter.phase4.value_in_unit(unit.radian),
+                    }
+                    # this torsion was optimised update the parameters
+                    matches = molecule.get_smarts_matches(parameter.smirks)
+                    for match in matches:
+                        molecule.TorsionForce[match].update(**parameter_data)
+
             return molecule

@@ -4,8 +4,8 @@ import subprocess as sp
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, List, Optional
 
+from openmm import System, app
 from qcelemental.util import which
-from simtk.openmm import System, app
 from typing_extensions import Literal
 
 from qubekit.parametrisation.base_parametrisation import Parametrisation
@@ -24,7 +24,7 @@ class AnteChamber(Parametrisation):
     force_field: Literal["gaff", "gaff2"] = "gaff2"
 
     def start_message(self, **kwargs) -> str:
-        return f"Parametrising molecule with {self.force_field}."
+        return f"Parametrising molecules and fragments with {self.force_field}."
 
     @classmethod
     def is_available(cls) -> bool:

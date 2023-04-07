@@ -1,9 +1,8 @@
 from typing import TYPE_CHECKING, List, Optional
 
+from openmm import System, unit
 from pydantic import validator
 from qcelemental.util import which_import
-from simtk import unit
-from simtk.openmm import System
 from typing_extensions import Literal
 
 from qubekit.parametrisation.base_parametrisation import Parametrisation
@@ -38,10 +37,10 @@ class OpenFF(Parametrisation):
     """
 
     type: Literal["OpenFF"] = "OpenFF"
-    force_field: str = "openff_unconstrained-1.3.0.offxml"
+    force_field: str = "openff_unconstrained-2.0.0.offxml"
 
     def start_message(self, **kwargs) -> str:
-        return f"Parametrising molecule with {self.force_field}."
+        return f"Parametrising molecule and fragments with {self.force_field}."
 
     @classmethod
     def is_available(cls) -> bool:
@@ -63,7 +62,12 @@ class OpenFF(Parametrisation):
         Make sure the supplied force field is valid.
         """
 
-        openff_forcefields = [ff.lower() for ff in get_available_force_fields()]
+        # a special case: forcebalance generates a bespoke forcefield that we read in
+        forcebalance_torsion_optimisation_ff = ["result/optimize/bespoke.offxml"]
+
+        openff_forcefields = [
+            ff.lower() for ff in get_available_force_fields()
+        ] + forcebalance_torsion_optimisation_ff
         if force_field in openff_forcefields:
             return force_field.lower()
         else:
@@ -86,7 +90,7 @@ class OpenFF(Parametrisation):
         # Make the OpenMM system
         off_topology = off_molecule.to_topology()
 
-        forcefield = ForceField(self.force_field)
+        forcefield = ForceField(self.force_field, allow_cosmetic_attributes=True)
         # we need to remove the constraints
         if "Constraints" in forcefield._parameter_handlers:
             del forcefield._parameter_handlers["Constraints"]

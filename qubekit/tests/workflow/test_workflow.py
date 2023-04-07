@@ -28,7 +28,7 @@ def test_running_order_end():
     Make sure the end stage is included when supplied to the running order.
     """
     running_order = WorkFlow.get_running_order(end="charges")
-    assert len(running_order) == 4
+    assert len(running_order) == 5
     assert running_order[-1] == "charges"
 
 
@@ -100,14 +100,22 @@ def test_build_results_optional(acetone):
     "skip_stages",
     [pytest.param(["charges", "hessian"], id="stages"), pytest.param(None, id="None")],
 )
-def test_optional_stage_skip(skip_stages):
+@pytest.mark.parametrize(
+    "optional_stage",
+    [
+        pytest.param("virtual_sites", id="vsites"),
+        pytest.param("fragmentation", id="fragmentation"),
+    ],
+)
+def test_optional_stage_skip(skip_stages, optional_stage):
     """
     Test adding the optional stages to the skip list.
     """
     # has no vsite stage
     model0 = get_workflow_protocol(workflow_protocol="0")
+    setattr(model0, optional_stage, None)
     skips = model0._get_optional_stage_skip(skip_stages=skip_stages)
-    assert "virtual_sites" in skips
+    assert optional_stage in skips
 
 
 def test_run_workflow(acetone, tmpdir, rdkit_workflow):

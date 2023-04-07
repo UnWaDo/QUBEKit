@@ -29,6 +29,13 @@ setup(
             "QUBEKit = qubekit.cli.cli:cli",
             "qubekit = qubekit.cli.cli:cli",
             "QUBEKit-pro = qubekit.proteins.protein_run:main",
+        ],
+        "openff.toolkit.plugins.handlers": [
+            "QUBEKitvdWTS = qubekit.cli.utils:QUBEKitHandler",
+            "LocalCoordinateVirtualSites = qubekit.cli.utils:LocalCoordinateVirtualSiteHandler",
+            "UreyBradley = qubekit.cli.utils:UreyBradleyHandler",
+            "ProperRyckhaertBellemans = qubekit.cli.utils:ProperRyckhaertBellemansHandler",
+            "BondChargeCorrection = qubekit.cli.utils:BondChargeCorrectionHandler"
         ]
     },
     version=versioneer.get_version(),

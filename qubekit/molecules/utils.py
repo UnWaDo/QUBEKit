@@ -107,7 +107,7 @@ class RDKit:
     @staticmethod
     def smiles_to_rdkit_mol(smiles_string: str, name: Optional[str] = None):
         """
-        Converts smiles strings to RDKit mol object.
+        Converts smiles strings to RDKit mol object. We are reusing here the OpenFF logic.
         Args:
             smiles_string:
                 The hydrogen free smiles string
@@ -116,15 +116,34 @@ class RDKit:
         return:
             The RDKit molecule
         """
-
-        mol = AllChem.MolFromSmiles(smiles_string)
+        mol = AllChem.MolFromSmiles(smiles_string, sanitize=False)
         if name is None:
             name = input("Please enter a name for the molecule:\n>")
         mol.SetProp("_Name", name)
-        mol_hydrogens = AllChem.AddHs(mol)
-        AllChem.EmbedMolecule(mol_hydrogens, randomSeed=1)
-        AllChem.SanitizeMol(mol_hydrogens)
-        return mol_hydrogens
+
+        # strip the atom map before sanitizing and assigning sterochemistry
+        atom_index_to_map = {}
+        for atom in mol.GetAtoms():
+            # set the map back to zero but hide the index in the atom prop data
+            atom_index_to_map[atom.GetIdx()] = atom.GetAtomMapNum()
+            # set it back to zero
+            atom.SetAtomMapNum(0)
+
+        Chem.SanitizeMol(mol)
+        Chem.SetAromaticity(mol, Chem.AromaticityModel.AROMATICITY_MDL)
+
+        # Chem.MolFromSmiles adds bond directions (i.e. ENDDOWNRIGHT/ENDUPRIGHT), but
+        # doesn't set bond.GetStereo(). We need to call AssignStereochemistry for that.
+        Chem.AssignStereochemistry(mol)
+
+        mol = AllChem.AddHs(mol)
+
+        AllChem.EmbedMolecule(mol, randomSeed=1)
+        # put the map index back on the atoms
+        for atom in mol.GetAtoms():
+            atom.SetAtomMapNum(atom_index_to_map.get(atom.GetIdx(), 0))
+
+        return mol
 
     @staticmethod
     def rdkit_descriptors(rdkit_mol: Chem.Mol) -> Dict[str, float]:
@@ -216,10 +235,14 @@ class RDKit:
         # smarts can match forward and backwards so condense the matches
         all_matches = set()
         for match in cp_mol.GetSubstructMatches(
-            smarts_mol, uniquify=True, useChirality=True
+            smarts_mol, uniquify=False, useChirality=True
         ):
             smirks_atoms = [match[atom] for atom in mapping.values()]
-            all_matches.add(tuple(smirks_atoms))
+            # add with the lowest index atom first
+            if smirks_atoms[0] < smirks_atoms[-1]:
+                all_matches.add(tuple(smirks_atoms))
+            else:
+                all_matches.add(tuple(reversed(smirks_atoms)))
         return list(all_matches)
 
     @staticmethod
@@ -262,7 +285,7 @@ class RDKit:
         return [conformer.GetPositions() for conformer in positions]
 
     @staticmethod
-    def find_symmetry_classes(rdkit_mol: Chem.Mol) -> Dict[int, str]:
+    def find_symmetry_classes(rdkit_mol: Chem.Mol) -> Dict[int, int]:
         """
         Generate list of tuples of symmetry-equivalent (homotopic) atoms in the molecular graph
         based on: https://sourceforge.net/p/rdkit/mailman/message/27897393/
@@ -297,7 +320,7 @@ class RDKit:
         # i will be used to define the class (just index based)
         for i, sym_class in enumerate(atom_symmetry_classes):
             for atom in sym_class:
-                atom_symmetry_classes_dict[atom] = str(i)
+                atom_symmetry_classes_dict[atom] = i
 
         return atom_symmetry_classes_dict
 
@@ -359,7 +382,6 @@ class ReadInput:
         rdkit_mol: Optional = None,
         name: Optional[str] = None,
     ):
-
         self.coords = coords
         self.rdkit_mol = rdkit_mol
         self.name = name

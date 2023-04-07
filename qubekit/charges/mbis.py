@@ -18,7 +18,6 @@ from qubekit.utils.exceptions import SpecificationError
 
 
 class MBISCharges(ChargeBase):
-
     type: Literal["MBISCharges"] = "MBISCharges"
     solvent_settings: Optional[SolventPsi4] = Field(
         SolventPsi4(units="au", medium_Solvent="chloroform"),
@@ -55,7 +54,7 @@ class MBISCharges(ChargeBase):
     def _gas_calculation_settings(self) -> Dict[str, Any]:
         return {"scf_properties": ["MBIS_CHARGES"]}
 
-    def _run(
+    def _execute(
         self, molecule: "Ligand", local_options: LocalResource, qc_spec: QCOptions
     ) -> "Ligand":
         """

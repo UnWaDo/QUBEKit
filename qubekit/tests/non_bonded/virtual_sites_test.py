@@ -4,12 +4,16 @@ import os
 from tempfile import TemporaryDirectory
 
 import numpy as np
+import openmm
 import pytest
+from openff.toolkit.topology import Molecule
+from openff.toolkit.typing.engines.smirnoff import ForceField
+from openmm import app, unit
 
 from qubekit.charges import DDECCharges, ExtractChargeData
+from qubekit.forcefield import VirtualSite3Point, VirtualSite4Point
 from qubekit.molecules import Ligand
 from qubekit.nonbonded.protocols import cl_base, get_protocol
-from qubekit.nonbonded.virtual_sites import VirtualSites
 from qubekit.parametrisation import OpenFF
 from qubekit.utils.constants import BOHR_TO_ANGS
 from qubekit.utils.file_handling import get_data
@@ -38,25 +42,14 @@ def mol():
 
 
 def test_extract_charge(mol):
-
     assert mol.atoms[0].aim.charge == -0.220571
     assert mol.atoms[0].dipole.x == 0.109103
     assert mol.atoms[0].aim.volume == 30.289335
 
 
 def test_apply_symmetrisation(mol):
-
     assert mol.atoms[2].aim.charge == mol.atoms[3].aim.charge
     assert mol.atoms[2].aim.volume == mol.atoms[3].aim.volume
-
-
-@pytest.fixture(scope="module")
-def vs(mol):
-    """
-    Initialise the VirtualSites class to be used for the following tests
-    """
-    virtual_sites = VirtualSites()
-    return virtual_sites
 
 
 @pytest.mark.parametrize(
@@ -238,3 +231,161 @@ def test_refit(mol, vs, tmpdir):
         assert ref.NonbondedForce[(1,)].charge == mol.NonbondedForce[(1,)].charge
         # make sure the aim data was not changed
         assert ref.atoms[1].aim.charge == mol.atoms[1].aim.charge
+
+
+def test_vsite_frozen_angles(methanol, vs, tmpdir):
+    """
+    Test fitting vsites with the angle between 2 sites frozen
+    """
+
+    with tmpdir.as_cwd():
+        vs.freeze_site_angles = True
+        vs.run(molecule=methanol)
+        assert methanol.extra_sites.n_sites == 2
+
+        # check the angle between the sites is 90 degrees
+        sites = []
+        center_atom = None
+        print(os.listdir("."))
+        with open(
+            os.path.join(methanol.name, "xyz_with_extra_point_charges.xyz")
+        ) as xyz:
+            for line in xyz.readlines():
+                if line.startswith("X"):
+                    sites.append(np.array([float(x) for x in line.split()[1:4]]))
+                elif line.startswith("O"):
+                    center_atom = np.array([float(x) for x in line.split()[1:4]])
+        # work out the angle
+        b1, b2 = sites[0] - center_atom, sites[1] - center_atom
+        cosine_angle = np.dot(b1, b2) / (np.linalg.norm(b1) * np.linalg.norm(b2))
+        assert pytest.approx(90) == np.degrees(np.arccos(cosine_angle))
+
+        # work out the distance this should be around 1
+        for site in sites:
+            assert np.linalg.norm(center_atom - site) == pytest.approx(0.95, abs=0.01)
+
+
+def test_vsite_opt_angles(methanol, vs, tmpdir):
+    """
+    Test fitting vsites with the angle between 2 sites frozen
+    """
+
+    with tmpdir.as_cwd():
+        vs.freeze_site_angles = False
+        vs.run(molecule=methanol)
+        assert methanol.extra_sites.n_sites == 2
+
+        # check the angle between the sites is 90 degrees
+        sites = []
+        center_atom = None
+        with open(
+            os.path.join(methanol.name, "xyz_with_extra_point_charges.xyz")
+        ) as xyz:
+            for line in xyz.readlines():
+                if line.startswith("X"):
+                    sites.append(np.array([float(x) for x in line.split()[1:4]]))
+                elif line.startswith("O"):
+                    center_atom = np.array([float(x) for x in line.split()[1:4]])
+        # work out the angle
+        b1, b2 = sites[0] - center_atom, sites[1] - center_atom
+        cosine_angle = np.dot(b1, b2) / (np.linalg.norm(b1) * np.linalg.norm(b2))
+        assert pytest.approx(110.6, abs=1) == np.degrees(np.arccos(cosine_angle))
+
+
+def test_vsite_reg(methanol, vs, tmpdir):
+    """
+    Make the regularisation is correctly turned on when requested.
+    """
+    with tmpdir.as_cwd():
+        vs.freeze_site_angles = True
+        vs.regularisation_epsilon = 0.1
+        vs.run(molecule=methanol)
+        assert methanol.extra_sites.n_sites == 2
+
+        # check the total distance the site is from the parent
+        sites = []
+        center_atom = None
+        with open(
+            os.path.join(methanol.name, "xyz_with_extra_point_charges.xyz")
+        ) as xyz:
+            for line in xyz.readlines():
+                if line.startswith("X"):
+                    sites.append(np.array([float(x) for x in line.split()[1:4]]))
+                elif line.startswith("O"):
+                    center_atom = np.array([float(x) for x in line.split()[1:4]])
+        # work out the distance
+        for site in sites:
+            assert np.linalg.norm(center_atom - site) == pytest.approx(0.29, abs=0.01)
+
+
+def test_vsite_no_sites(vs, tmpdir):
+    """
+    QUBEKit was saving 1 site even if the error was not lower than the threshold make sure this is not the case now
+    """
+
+    with tmpdir.as_cwd():
+        mol = Ligand.parse_file(get_data("no_sites_fit.json"))
+        assert mol.extra_sites.n_sites == 0
+        vs.run(molecule=mol)
+        assert mol.extra_sites.n_sites == 0
+        with open(os.path.join(mol.name, "site_results.txt")) as site_data:
+            data_line = site_data.readlines()[0]
+            # make sure it says no sites were saved
+            assert data_line.startswith("No virtual sites have been added")
+
+
+def test_amine_special_case(tmpdir, vs):
+    """
+    Make sure amine special case v-sites are correctly saved to the QK model and wrote to XML and OFFXML
+    """
+
+    with tmpdir.as_cwd():
+        mol = Ligand.parse_file(get_data("methylamine.json"))
+        assert mol.extra_sites.n_sites == 0
+        vs.run(molecule=mol)
+        # we should two sites the first a 4point the second 3 point special case
+        assert mol.extra_sites.n_sites == 2
+        sites = mol.extra_sites[1]
+        assert type(sites[0]) == VirtualSite4Point
+        assert type(sites[1]) == VirtualSite3Point
+        # make sure the second site only depends on Hs
+        assert mol.atoms[sites[1].closest_a_index].atomic_symbol == "H"
+        assert mol.atoms[sites[1].closest_b_index].atomic_symbol == "H"
+
+        # load both models into openmm and make sure the site positions are the same
+        mol.to_offxml("sites.offxml")
+        mol.write_parameters("sites.xml")
+
+        offxml = ForceField("sites.offxml", load_plugins=True)
+        off_mol = Molecule.from_rdkit(mol.to_rdkit())
+        # check the sites are constructed at a random conformation
+        off_mol.generate_conformers(n_conformers=1, clear_existing=True)
+        positions = off_mol.conformers[0].value_in_unit(unit.angstroms)
+        # pad with dummy space
+        padded_pos = np.vstack([positions, [0, 0, 0], [0, 0, 0]])
+        off_system = offxml.create_openmm_system(off_mol.to_topology())
+        integrator = openmm.LangevinIntegrator(
+            300 * unit.kelvin, 1 / unit.picosecond, 0.5 * unit.femtosecond
+        )
+        off_context = openmm.Context(off_system, integrator)
+        off_context.setPositions(padded_pos * unit.angstroms)
+        off_context.computeVirtualSites()
+        off_state = off_context.getState(getPositions=True)
+        off_site_pos = off_state.getPositions().value_in_unit(unit.angstroms)
+
+        xml_ff = app.ForceField("sites.xml")
+        modeller = app.Modeller(
+            topology=mol.to_openmm_topology(), positions=off_mol.conformers[0]
+        )
+        modeller.addExtraParticles(forcefield=xml_ff)
+        xml_system = xml_ff.createSystem(topology=modeller.topology)
+        integrator = openmm.LangevinIntegrator(
+            300 * unit.kelvin, 1 / unit.picosecond, 0.5 * unit.femtosecond
+        )
+        xml_context = openmm.Context(xml_system, integrator)
+        xml_context.setPositions(modeller.positions)
+        xml_context.computeVirtualSites()
+        xml_state = xml_context.getState(getPositions=True)
+        xml_site_pos = xml_state.getPositions().value_in_unit(unit.angstroms)
+
+        assert np.allclose(off_site_pos, xml_site_pos)

@@ -5,8 +5,12 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 from xml.dom.minidom import parseString
 
 import click
+from openff.toolkit.typing.engines.smirnoff import ForceField
+from openmm import unit
+from typing_extensions import Literal
 
 import qubekit
+from qubekit.cli.water_models import water_models_local, water_models_normal
 from qubekit.utils import constants
 from qubekit.workflow import WorkFlowResult
 
@@ -19,6 +23,7 @@ parameters_to_fit = click.Choice(
     elements,
     case_sensitive=True,
 )
+water_options = click.Choice(list(water_models_normal.keys()), case_sensitive=True)
 
 
 @click.command()
@@ -38,8 +43,40 @@ parameters_to_fit = click.Choice(
     default=False,
     help="If the xmls should be combined with no optimisation targets, this option is useful for Forcebalance single point evaluations.",
 )
+@click.option(
+    "-offxml",
+    is_flag=True,
+    default=False,
+    show_default=True,
+    help="Make an offxml style force field if possible.",
+)
+@click.option(
+    "--lj-on-polar-h/--no-lj-on-polar-h",
+    default=True,
+    show_default=True,
+    help="Add or remove LJ terms from polar hydroges, they will have their C6 transferred to the parent atom if excluded.",
+)
+@click.option(
+    "-w",
+    "--water-model",
+    type=water_options,
+    help="The name of a published water model to include in an offxml Note this will cause a clash if used with a QUBEKit local model.",
+)
+@click.option(
+    "-h-con",
+    "--h-constraints",
+    show_default=True,
+    default=True,
+    help="If the offxml should include h-bond constraints, offxmls include constraints by default.",
+)
 def combine(
-    filename: str, parameters: Optional[List[str]] = None, no_targets: bool = False
+    filename: str,
+    parameters: Optional[List[str]] = None,
+    no_targets: bool = False,
+    offxml: bool = False,
+    water_model: str = "tip3p",
+    h_constraints: bool = True,
+    lj_on_polar_h: bool = True,
 ):
     """
     Combine a list of molecules together and create a single master XML force field file.
@@ -56,15 +93,208 @@ def combine(
     elif no_targets:
         parameters = []
 
-    xml_data = _combine_molecules(
-        molecules=molecules, rfree_data=rfrees, parameters=parameters
-    ).getroot()
-    messy = ET.tostring(xml_data, "utf-8")
+    if offxml:
+        _combine_molecules_offxml(
+            molecules,
+            rfree_data=rfrees,
+            parameters=parameters,
+            filename=filename,
+            water_model=water_model,
+            h_constraints=h_constraints,
+            lj_on_polar_h=lj_on_polar_h,
+        )
 
-    pretty_xml = parseString(messy).toprettyxml(indent="")
+    else:
+        xml_data = _combine_molecules(
+            molecules=molecules, rfree_data=rfrees, parameters=parameters
+        ).getroot()
+        messy = ET.tostring(xml_data, "utf-8")
 
-    with open(filename, "w") as xml_doc:
-        xml_doc.write(pretty_xml)
+        pretty_xml = parseString(messy).toprettyxml(indent="")
+
+        with open(filename, "w") as xml_doc:
+            xml_doc.write(pretty_xml)
+
+
+def _add_water_model(
+    force_field: ForceField,
+    water_model: Literal["tip3p", "tip4p-fb"] = "tip3p",
+    use_local_sites: bool = False,
+):
+    """Add a water model to an offxml force field"""
+
+    if use_local_sites:
+        available_models = water_models_local
+    else:
+        available_models = water_models_normal
+    if water_model in available_models:
+        water_parameters = available_models[water_model]
+        for parameter_handler, parameters in water_parameters.items():
+            if parameter_handler == "Nonbonded":
+                handler = force_field.get_parameter_handler("vdW")
+            else:
+                handler = force_field.get_parameter_handler(parameter_handler)
+            for parameter in parameters:
+                handler.add_parameter(parameter_kwargs=parameter)
+    else:
+        raise NotImplementedError(
+            f"Only the {list(water_models_local.keys())} water models are support for offxmls so far."
+        )
+
+
+def _combine_molecules_offxml(
+    molecules: List["Ligand"],
+    parameters: List[str],
+    rfree_data: Dict[str, Dict[str, Union[str, float]]],
+    filename: str,
+    water_model: Optional[Literal["tip3p", "tip4p-fb"]] = None,
+    h_constraints: bool = True,
+    lj_on_polar_h: bool = True,
+) -> None:
+    """
+    Main worker function to build the combined offxmls.
+    """
+
+    if (
+        sum([molecule.ImproperRBTorsionForce.n_parameters for molecule in molecules])
+        > 0
+    ):
+        raise NotImplementedError(
+            "RBTorsions improper can not yet be safely converted into offxml format yet."
+        )
+
+    try:
+        from chemper.graphs.cluster_graph import ClusterGraph
+    except ModuleNotFoundError:
+        raise ModuleNotFoundError(
+            "chemper is required to make an offxml, please install with `conda install chemper -c conda-forge`."
+        )
+
+    fit_ab = False
+    # if alpha and beta should be fit
+    if "AB" in parameters:
+        fit_ab = True
+
+    rfree_codes = set()  # keep track of all rfree codes used by these molecules
+    # create the master ff
+    offxml = ForceField(allow_cosmetic_attributes=True, load_plugins=True)
+    offxml.author = f"QUBEKit_version_{qubekit.__version__}"
+    offxml.date = datetime.now().strftime("%Y_%m_%d")
+    # get all of the handlers
+    constraints = offxml.get_parameter_handler("Constraints")
+    if h_constraints:
+        constraints.add_parameter(
+            parameter_kwargs={"smirks": "[#1:1]-[*:2]", "id": "h-c1"}
+        )
+    # add the handlers to ensure we get them in the order we want
+    _ = offxml.get_parameter_handler("Bonds")
+    _ = offxml.get_parameter_handler("Angles")
+    _ = offxml.get_parameter_handler("ProperTorsions")
+    _ = offxml.get_parameter_handler("ImproperTorsions")
+    _ = offxml.get_parameter_handler(
+        "Electrostatics", handler_kwargs={"scale14": 0.8333333333, "version": 0.3}
+    )
+    using_plugin = False
+    if parameters:
+        # if we want to optimise the Rfree we need our custom handler
+        vdw_handler = offxml.get_parameter_handler(
+            "QUBEKitvdWTS", allow_cosmetic_attributes=True
+        )
+        vdw_handler.lj_on_polar_h = str(lj_on_polar_h)
+        using_plugin = True
+        # add a dummy parameter to avoid missing parameters
+        vdw = offxml.get_parameter_handler("vdW", allow_cosmetic_attributes=True)
+        vdw.add_parameter(
+            parameter_kwargs={
+                "smirks": "[*:1]",
+                "epsilon": 0 * unit.kilojoule_per_mole,
+                "sigma": 1 * unit.nanometer,
+                "id": "g1",
+            }
+        )
+    else:
+        vdw_handler = offxml.get_parameter_handler(
+            "vdW", allow_cosmetic_attributes=True
+        )
+
+    for molecule in molecules:
+        print(f"Adding parameters for molecule {molecule.name}")
+        # add each parameter section but use a special method to add the nonbonded section used for Rfree opt
+        molecule._build_offxml_bonds(offxml=offxml)
+        molecule._build_offxml_angles(offxml=offxml)
+        molecule._build_offxml_torsions(offxml=offxml, parameterize=False)
+        molecule._build_offxml_improper_torsions(offxml=offxml)
+        if molecule.RBTorsionForce.n_parameters > 0:
+            molecule._build_offxml_rb_torsions(offxml=offxml)
+        molecule._build_offxml_charges(offxml=offxml)
+        molecule._build_offxml_vs(offxml=offxml)
+
+        atom_types = {}
+        rdkit_mol = molecule.to_rdkit()
+
+        for atom_index, cip_type in molecule.atom_types.items():
+            atom_types.setdefault(cip_type, []).append((atom_index,))
+        for sym_set in atom_types.values():
+            graph = ClusterGraph(
+                mols=[rdkit_mol], smirks_atoms_lists=[sym_set], layers="all"
+            )
+            qube_non_bond = molecule.NonbondedForce[sym_set[0]]
+            rfree_code = _get_parameter_code(
+                molecule=molecule, atom_index=sym_set[0][0]
+            )
+            atom_data = {
+                "smirks": graph.as_smirks(),
+            }
+
+            if rfree_code in parameters or fit_ab:
+                # keep track of present codes to optimise
+                rfree_codes.add(rfree_code)
+            if using_plugin:
+                # this is to be refit
+                atom = molecule.atoms[qube_non_bond.atoms[0]]
+                atom_data["volume"] = atom.aim.volume * unit.bohr**3
+            else:
+                atom_data["epsilon"] = qube_non_bond.epsilon * unit.kilojoule_per_mole
+                atom_data["sigma"] = qube_non_bond.sigma * unit.nanometers
+
+            vdw_handler.add_parameter(parameter_kwargs=atom_data)
+
+    # now loop over all the parameters to be fit and add them as cosmetic attributes
+    to_parameterize = []
+    for parameter_to_fit in parameters:
+        if parameter_to_fit != "AB" and parameter_to_fit in rfree_codes:
+            setattr(
+                vdw_handler,
+                f"{parameter_to_fit.lower()}free",
+                unit.Quantity(
+                    rfree_data[parameter_to_fit]["r_free"], unit=unit.angstroms
+                ),
+            )
+            if not lj_on_polar_h and parameter_to_fit.lower() == "x":
+                # do add the parameterize tag to polar h if not included
+                continue
+            else:
+                to_parameterize.append(f"{parameter_to_fit.lower()}free")
+    if fit_ab:
+        vdw_handler.alpha = rfree_data["alpha"]
+        vdw_handler.beta = rfree_data["beta"]
+        to_parameterize.extend(["alpha", "beta"])
+    if to_parameterize:
+        vdw_handler.add_cosmetic_attribute("parameterize", ", ".join(to_parameterize))
+
+    # now add a water model to the force field
+    use_local_sites = True
+    local_vsites = offxml.get_parameter_handler("LocalCoordinateVirtualSites")
+    if len(local_vsites._parameters) == 0:
+        use_local_sites = False
+        # deregister the handler if not in use
+        offxml.deregister_parameter_handler("LocalCoordinateVirtualSites")
+
+    if water_model is not None:
+        _add_water_model(
+            force_field=offxml, water_model=water_model, use_local_sites=use_local_sites
+        )
+    offxml.to_file(filename=filename)
 
 
 def _combine_molecules(
@@ -100,7 +330,6 @@ def _combine_molecules(
 
     # loop over molecules and create forces as they are found
     for molecule in molecules:
-
         resiude = ET.SubElement(Residues, "Residue", name=molecule.name)
 
         for atom in molecule.atoms:
@@ -273,6 +502,8 @@ def _combine_molecules(
                     atom=atom,
                     rfree_data=rfree_data[rfree_code],
                     a_and_b=fit_ab,
+                    alpha_ref=rfree_data["alpha"],
+                    beta_ref=rfree_data["beta"],
                     rfree_code=rfree_code if rfree_code in parameters else None,
                 )
                 atom_data["parameter_eval"] = eval_string
@@ -322,6 +553,8 @@ def _get_eval_string(
     atom: "Atom",
     rfree_data: Dict[str, str],
     a_and_b: bool,
+    alpha_ref: str,
+    beta_ref: str,
     rfree_code: Optional[str] = None,
 ) -> str:
     """
@@ -329,26 +562,26 @@ def _get_eval_string(
     """
 
     if a_and_b:
-        alpha = "PARM['xalpha/alpha']*"
-        beta = f"*({atom.aim.volume}/{rfree_data['v_free']})**PARM['xbeta/beta']"
+        alpha = "PARM['xalpha/alpha']"
+        beta = "PARM['xbeta/beta']"
     else:
-        alpha, beta = "", ""
+        alpha, beta = alpha_ref, beta_ref
     if rfree_code is not None:
         rfree = f"PARM['{rfree_code}Element/{rfree_code.lower()}free']"
     else:
         rfree = f"{rfree_data['r_free']}"
 
     eval_string = (
-        f"epsilon=({alpha}{rfree_data['b_free']}{beta})/(128*{rfree}**6)*{constants.EPSILON_CONVERSION}, "
+        f"epsilon=({alpha}*{rfree_data['b_free']}*({atom.aim.volume}/{rfree_data['v_free']})**{beta})/(128*{rfree}**6)*{constants.EPSILON_CONVERSION}, "
         f"sigma=2**(5/6)*({atom.aim.volume}/{rfree_data['v_free']})**(1/3)*{rfree}*{constants.SIGMA_CONVERSION}"
     )
 
     return eval_string
 
 
-def _find_molecules_and_rfrees() -> Tuple[
-    List["Ligand"], Dict[str, Dict[str, Union[str, float]]]
-]:
+def _find_molecules_and_rfrees() -> (
+    Tuple[List["Ligand"], Dict[str, Dict[str, Union[str, float]]]]
+):
     """
     Loop over the local directories looking for qubekit WorkFlowResults and extract the ligands and a list of all
     unique free params used to parameterise the molecules.

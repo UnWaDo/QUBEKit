@@ -1,11 +1,11 @@
+![QUBEKit_logo](https://user-images.githubusercontent.com/30259414/220639869-fe2382b4-47e9-4f5d-9173-4c38dcfdb8c8.png)
 # QUBEKit - *Qu*antum Mechanical *Be*spoke force field tool*kit*
-
 #### **Newcastle University UK - Cole Group**
 
-| **Status** | [![Language grade: Python](https://img.shields.io/lgtm/grade/python/g/qubekit/QUBEKit.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/qubekit/QUBEKit/context:python) [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)  [![CI](https://github.com/qubekit/QUBEKit/actions/workflows/CI.yaml/badge.svg)](https://github.com/qubekit/QUBEKit/actions/workflows/CI.yaml)  [![codecov](https://codecov.io/gh/qubekit/QUBEKit/branch/main/graph/badge.svg?token=E554IAATJC)](https://codecov.io/gh/qubekit/QUBEKit)|
+| **Status** | [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)  [![CI](https://github.com/qubekit/QUBEKit/actions/workflows/CI.yaml/badge.svg)](https://github.com/qubekit/QUBEKit/actions/workflows/CI.yaml)  [![codecov](https://codecov.io/gh/qubekit/QUBEKit/branch/main/graph/badge.svg?token=E554IAATJC)](https://codecov.io/gh/qubekit/QUBEKit) [![Integration tests](https://github.com/qubekit/QUBEKit/actions/workflows/integration.yaml/badge.svg)](https://github.com/qubekit/QUBEKit/actions/workflows/integration.yaml)|
 | :------ | :------ |
-| **Foundation** | [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![python](https://img.shields.io/badge/python-3.6%2C%203.7%2C%203.8%2C%203.9-blue.svg)](https://www.python.org/) [![platforms](https://anaconda.org/conda-forge/qubekit/badges/platforms.svg)]() [![Conda (channel only)](https://img.shields.io/conda/vn/conda-forge/qubekit?color=blue&logo=anaconda&logoColor=white)](https://anaconda.org/conda-forge/qubekit)|
-| **Installation** | [![Anaconda-Server Badge](https://anaconda.org/conda-forge/qubekit/badges/installer/conda.svg)](https://anaconda.org/conda-forge/qubekit) [![Anaconda-Server Badge](https://anaconda.org/conda-forge/qubekit/badges/downloads.svg)](https://anaconda.org/conda-forge/qubekit) [![Anaconda-Server Badge](https://anaconda.org/conda-forge/qubekit/badges/latest_release_date.svg)](https://anaconda.org/conda-forge/qubekit) |
+| **Foundation** | [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![python](https://img.shields.io/badge/python-3.7%2C%203.8%2C%203.9-blue.svg)](https://www.python.org/) [![platforms](https://anaconda.org/conda-forge/qubekit/badges/platforms.svg)]() [![Conda (channel only)](https://img.shields.io/conda/vn/conda-forge/qubekit?color=blue&logo=anaconda&logoColor=white)](https://anaconda.org/conda-forge/qubekit)|
+| **Installation** | [![Anaconda-Server Badge](https://anaconda.org/conda-forge/qubekit/badges/version.svg)](https://anaconda.org/conda-forge/qubekit) [![Anaconda-Server Badge](https://anaconda.org/conda-forge/qubekit/badges/downloads.svg)](https://anaconda.org/conda-forge/qubekit) [![Anaconda-Server Badge](https://anaconda.org/conda-forge/qubekit/badges/latest_release_date.svg)](https://anaconda.org/conda-forge/qubekit) |
 
 ## Table of Contents
 
@@ -27,13 +27,14 @@
 
 ## What is QUBEKit?
 
-[QUBEKit](https://blogs.ncl.ac.uk/danielcole/qube-force-field/) is a Python 3.6+ based force field derivation toolkit for Linux operating systems.
+[QUBEKit](https://blogs.ncl.ac.uk/danielcole/qube-force-field/) is a Python 3.7+ based force field derivation toolkit for Linux operating systems.
 Our aims are to allow users to quickly derive molecular mechanics parameters directly from quantum mechanical calculations.
 QUBEKit pulls together multiple pre-existing engines, as well as bespoke methods to produce accurate results with minimal user input.
 QUBEKit aims to avoid fitting to experimental data where possible while also being highly customisable.
 
 Users who have used QUBEKit to derive force field parameters should cite the following references (also given in the `CITATION.cff` file):
 
+* [Exploration and validation of force field design protocols through QM-to-MM mapping](https://pubs.rsc.org/en/content/articlelanding/2022/CP/D2CP02864F)
 * [QUBEKit: Automating the Derivation of Force Field Parameters from Quantum Mechanics](https://pubs.acs.org/doi/full/10.1021/acs.jcim.8b00767)
 * [Biomolecular Force Field Parameterization via Atoms-in-Molecule Electron Density Partitioning](https://pubs.acs.org/doi/abs/10.1021/acs.jctc.6b00027)
 * [Harmonic Force Constants for Molecular Mechanics Force Fields via Hessian Matrix Projection](https://pubs.acs.org/doi/10.1021/acs.jctc.7b00785)
@@ -73,13 +74,10 @@ Download Anaconda from the above link and install with the linux command:
 
 We recommend you add conda to your .bashrc when prompted.
 
-Optionally, you may choose to use Gaussian and Chargemol. 
-Gaussian is an option for QM optimisations, hessian calculations and density calculations.
-Chargemol is an option for charge partitioning. QUBEKit contains alternative approaches for these calculations.
-
-* [Gaussian09](http://gaussian.com/)
-
+Optionally, you may choose to use [Gaussian](http://gaussian.com/).
 Installation of Gaussian is likely handled by your institution.
+Gaussian is an option for QM optimisations, hessian calculations and density calculations.
+QUBEKit contains alternative approaches for these calculations.
 
 Minimal conda packages are included in the conda-forge install with all optional engine packages left to the user to install.
 If there are dependency issues or version conflicts in your environment, packages can be installed individually.
@@ -155,7 +153,7 @@ To create a config file template with the name "example", containing default opt
 
     qubekit config create example.json
 
-Simply edit the sections as desired to change the method, basis set, memory etc.
+Simply edit the sections as desired to change the method, basis set, memory, etc.
 
 This config file can then be used to execute a QUBEKit job using the `--config` or `-c` flag in the run command.
 
@@ -178,7 +176,7 @@ In the case of a smiles string, the molecule must also be named with the `--name
 ### QUBEKit Commands: High Throughput
 
 Bulk commands are for high throughput analyses; they are invoked with the `bulk` keyword.
-A csv must be used when running a bulk analysis.
+A csv file must be used when running a bulk analysis.
 If you would like to generate a blank csv file, simply run the command:
 
     qubekit bulk create example.csv 
@@ -198,9 +196,9 @@ any empty columns will simply use the default values:
 * If the multiplicity column is empty, multiplicity will be set to 1; 
 * If the config column is empty, the default config is used;
 * Leaving the restart column empty will start the program from the beginning;
-* Leaving the end column empty will end the program after a full analysis.
+* Leaving the end column empty will end the program after a full analysis from its start point.
 
-A bulk analysis is called with the `run` command, followed by the name of the csv file:
+A bulk analysis is started with the `run` command, followed by the name of the csv file:
 
     qubekit bulk run example.csv
     

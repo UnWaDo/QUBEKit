@@ -1,6 +1,7 @@
 import pytest
 
-from qubekit.molecules import Ligand
+from qubekit.molecules import Ligand, TorsionDriveData
+from qubekit.nonbonded import VirtualSites
 from qubekit.parametrisation import XML, AnteChamber, OpenFF
 from qubekit.utils.file_handling import get_data
 from qubekit.workflow.workflow import QCOptions, WorkFlow
@@ -17,7 +18,9 @@ def acetone():
 @pytest.fixture()
 def water():
     """Make a qube water molecule."""
-    return Ligand.from_file(file_name=get_data("water.pdb"))
+    w = Ligand.from_file(file_name=get_data("water.pdb"))
+    w.name = "water"
+    return w
 
 
 @pytest.fixture()
@@ -27,7 +30,7 @@ def antechamber():
 
 @pytest.fixture()
 def openff():
-    return OpenFF(force_field="openff_unconstrained-1.3.0.offxml")
+    return OpenFF(force_field="openff_unconstrained-2.0.0.offxml")
 
 
 @pytest.fixture()
@@ -38,6 +41,11 @@ def xml():
 @pytest.fixture()
 def coumarin():
     return Ligand.parse_file(get_data("coumarin_hess_wbo.json"))
+
+
+@pytest.fixture()
+def coumarin_with_rb():
+    return Ligand.parse_file(get_data("coumarin_with_rb.json"))
 
 
 @pytest.fixture()
@@ -67,3 +75,56 @@ def rfree_data():
         "alpha": 1,
         "beta": 0.5,
     }
+
+
+@pytest.fixture()
+def methanol():
+    return Ligand.parse_file(get_data("methanol.json"))
+
+
+@pytest.fixture()
+def bace_fragmented():
+    # ie CN1C(=O)C(c2cccc(-c3cccnc3)c2)(C2CC2)[NH+]=C1N
+    """
+    Load the freshly fragmented BACE molecule with the fragments before deduplication
+    """
+    return Ligand.parse_file(get_data("bace17d_with_fragments.json"))
+
+
+@pytest.fixture()
+def symmetry_fragments():
+    """The raw result of fragmenting a symmetric molecule CCC(C)CC"""
+    return Ligand.parse_file(get_data("symmetry_fragments.json"))
+
+
+@pytest.fixture()
+def vs():
+    """
+    Initialise the VirtualSites class to be used for the following tests
+    """
+    virtual_sites = VirtualSites()
+    return virtual_sites
+
+
+@pytest.fixture()
+def ethanol():
+    return Ligand.parse_file(get_data("ethanol_sites.json"))
+
+
+@pytest.fixture()
+def biphenyl_fragments():
+    return Ligand.parse_file(get_data("ring_test.json"))
+
+
+@pytest.fixture()
+def biphenyl():
+    """
+    Load up a biphenyl molecule with some torsiondrive data.
+    """
+    mol = Ligand.from_file(file_name=get_data("biphenyl.sdf"))
+    # load the torsiondrive data
+    td_data = TorsionDriveData.from_qdata(
+        qdata_file=get_data("biphenyl_qdata.txt"), dihedral=(6, 10, 11, 8)
+    )
+    mol.add_qm_scan(scan_data=td_data)
+    return mol

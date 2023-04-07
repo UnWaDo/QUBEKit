@@ -15,7 +15,6 @@ Point4 = Tuple[float, float, float, float]
 
 
 class BasicParameterModel(BaseModel, abc.ABC):
-
     type: Literal["base"] = "base"
     attributes: Set[str] = Field(
         set(),
@@ -49,7 +48,6 @@ class BasicParameterModel(BaseModel, abc.ABC):
 
 
 class BaseParameter(BasicParameterModel):
-
     atoms: Tuple[int, ...] = Field(
         ..., description="The atom indices that this potential applies to."
     )
@@ -94,7 +92,6 @@ class BaseParameter(BasicParameterModel):
 
 
 class HarmonicBondParameter(BaseParameter):
-
     type: Literal["HarmonicBondParameter"] = "HarmonicBondParameter"
     length: float = Field(
         ...,
@@ -115,7 +112,6 @@ class HarmonicBondParameter(BaseParameter):
 
 
 class HarmonicAngleParameter(BaseParameter):
-
     type: Literal["HarmonicAngleParameter"] = "HarmonicAngleParameter"
     k: float = Field(
         ...,
@@ -134,8 +130,35 @@ class HarmonicAngleParameter(BaseParameter):
         return "Angle"
 
 
-class PeriodicTorsionParameter(BaseParameter):
+class UreyBradleyHarmonicParameter(BaseParameter):
+    type: Literal["UreyBradleyHarmonicParameter"] = "UreyBradleyHarmonicParameter"
+    k: float = Field(
+        ...,
+        description="The force constant for a harmonic potential in kj/mol/nm**2 representing a U-B "
+        "bond angle cross term. Note our k here is halved when calculating the energy "
+        "which is different to <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4772747/>.",
+    )
+    d: float = Field(
+        ..., description="The equilibrium bond length in the harmonic potential in nm."
+    )
 
+    @classmethod
+    def _n_tags(cls) -> int:
+        return 3
+
+    @classmethod
+    def openmm_type(cls) -> str:
+        return "UreyBradley"
+
+    def xml_data(self) -> Dict[str, str]:
+        xml_data = super().xml_data()
+        # we need to half the k value to get the correct behaviour in OpenMM
+        k = float(xml_data["k"])
+        xml_data["k"] = str(k / 2)
+        return xml_data
+
+
+class PeriodicTorsionParameter(BaseParameter):
     type: Literal["PeriodicTorsionParameter"] = "PeriodicTorsionParameter"
     k1: float = 0
     k2: float = 0
@@ -160,7 +183,6 @@ class PeriodicTorsionParameter(BaseParameter):
 
 
 class ImproperTorsionParameter(PeriodicTorsionParameter):
-
     type: Literal["ImproperTorsionParameter"] = "ImproperTorsionParameter"
 
     @classmethod
@@ -169,7 +191,6 @@ class ImproperTorsionParameter(PeriodicTorsionParameter):
 
 
 class BasicRBTorsionParameter(BaseParameter):
-
     type: Literal["BasicRBTorsionParameter"] = "BasicRBTorsionParameter"
     c0: float = 0
     c1: float = 0
@@ -184,7 +205,6 @@ class BasicRBTorsionParameter(BaseParameter):
 
 
 class ProperRBTorsionParameter(BasicRBTorsionParameter):
-
     type: Literal["ProperRBTorsionParameter"] = "ProperRBTorsionParameter"
 
     @classmethod
@@ -193,7 +213,6 @@ class ProperRBTorsionParameter(BasicRBTorsionParameter):
 
 
 class ImproperRBTorsionParameter(BasicRBTorsionParameter):
-
     type: Literal["ImproperRBTorsionParameter"] = "ImproperRBTorsionParameter"
 
     @classmethod
@@ -202,7 +221,6 @@ class ImproperRBTorsionParameter(BasicRBTorsionParameter):
 
 
 class BasicNonBondedParameter(BaseParameter):
-
     type: Literal["basic_non_bonded"] = "basic_non_bonded"
     charge: decimal.Decimal = Field(
         ..., description="The atomic partial charge in elementary charge units."
@@ -225,7 +243,6 @@ class BasicNonBondedParameter(BaseParameter):
 
 
 class LennardJones612Parameter(BasicNonBondedParameter):
-
     type: Literal["LennardJones612"] = "LennardJones612"
     epsilon: float = Field(
         ...,
@@ -238,7 +255,6 @@ class LennardJones612Parameter(BasicNonBondedParameter):
 
 
 class VirtualSite3Point(BasicParameterModel):
-
     type: Literal["VirtualSite3Point"] = "VirtualSite3Point"
     parent_index: int = Field(
         ..., description="The index of the atom the site is attached to."
@@ -307,7 +323,6 @@ class VirtualSite3Point(BasicParameterModel):
 
 
 class VirtualSite4Point(VirtualSite3Point):
-
     type: Literal["VirtualSite4Point"] = "VirtualSite4Point"
     closest_c_index: int = Field(
         ...,

@@ -25,7 +25,6 @@ class SchemaBase(BaseModel):
 
 
 class LocalResource(SchemaBase):
-
     cores: PositiveInt = Field(
         4, description="The number of cores to be allocated to the computation."
     )
@@ -114,7 +113,7 @@ class QCOptions(SchemaBase):
         """
         keywords = {
             "scf_type": "df",
-            # make sure we always use an ultrafine grid
+            # make sure we always use an ultra-fine grid
             "dft_spherical_points": 590,
             "dft_radial_points": 99,
         }
@@ -123,9 +122,12 @@ class QCOptions(SchemaBase):
             keywords["tdscf_states"] = self.td_settings.n_states
             keywords["tdscf_tda"] = self.td_settings.use_tda
 
-        # work around a setting in psi4, fixes range seperated functionals
+        # work around a setting in psi4, fixes range separated functionals
         if self.program.lower() == "psi4":
             keywords["wcombine"] = False
+        elif self.program.lower() == "xtb":
+            # stop too many open files error see <https://github.com/grimme-lab/xtb-python/issues/73>
+            keywords["verbosity"] = "muted"
         return keywords
 
     @property
@@ -213,7 +215,6 @@ class QCOptions(SchemaBase):
 
 
 class StageBase(SchemaBase, abc.ABC):
-
     type: Literal["base"] = "base"
 
     @classmethod
@@ -222,8 +223,21 @@ class StageBase(SchemaBase, abc.ABC):
         """Check any dependencies to make sure that this stage is available to run."""
         ...
 
+    def run(self, molecule: "Ligand", *args, **kwargs) -> "Ligand":
+        """run it on the molecule and on the fragments"""
+        molecule = self._run(molecule, *args, **kwargs)
+
+        # run it on the fragments
+        if molecule.fragments is not None:
+            molecule.fragments = [
+                self._run(fragment, *args, fragment=True, **kwargs)
+                for fragment in molecule.fragments
+            ]
+
+        return molecule
+
     @abc.abstractmethod
-    def run(self, molecule: "Ligand", **kwargs) -> "Ligand":
+    def _run(self, molecule: "Ligand", *args, **kwargs) -> "Ligand":
         """The main function of the stage which should perform some parametrisation and return the complete molecule."""
         ...
 

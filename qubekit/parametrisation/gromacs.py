@@ -1,6 +1,6 @@
 from typing import TYPE_CHECKING, List, Optional
 
-from simtk.openmm import System, app
+from openmm import System, app
 from typing_extensions import Literal
 
 from qubekit.parametrisation.base_parametrisation import Parametrisation
@@ -27,7 +27,6 @@ class Gromacs(Parametrisation):
     def _build_system(
         self, molecule: "Ligand", input_files: Optional[List[str]] = None
     ) -> System:
-
         # get the topfile
         top_file = None
         if input_files is not None:
