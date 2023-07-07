@@ -29,9 +29,11 @@ from qubekit.utils.constants import (
     M_TO_ANGS,
     PI,
     VACUUM_PERMITTIVITY,
+    HA_TO_KCAL_P_MOL,
 )
 from qubekit.utils.datastructures import StageBase
 from qubekit.utils.file_handling import folder_setup
+from qubekit.nonbonded.resp import fit_charges
 
 if TYPE_CHECKING:
     from qubekit.molecules import Ligand
@@ -61,6 +63,9 @@ class VirtualSites(StageBase):
     )
     site_error_threshold: float = Field(
         1.0, description="The ESP error threshold to start fitting virtual sites.", gt=0
+    )
+    use_resp: bool = Field(
+        False, description="Use RESP procedure to determine charges instead of AIM analysis"
     )
     freeze_site_angles: bool = Field(
         True,
@@ -146,11 +151,29 @@ class VirtualSites(StageBase):
                 else molecule.coordinates
             )
             self._molecule = molecule
+
+            if self.use_resp:
+                self._sample_points = self._generate_sample_points_molecule()
+                self._no_site_esps = self._generate_esp_molecule()
+
             for atom_index, atom in enumerate(molecule.atoms):
                 if len(atom.bonds) < 4:
-                    self._sample_points = self._generate_sample_points_atom(atom_index)
-                    self._no_site_esps = self._generate_esp_atom(atom_index)
+                    if not self.use_resp:
+                        self._sample_points = self._generate_sample_points_atom(atom_index)
+                        self._no_site_esps = self._generate_esp_atom(atom_index)
                     self._fit(atom_index)
+
+            if self.use_resp:
+                vsites = [c[0] for c in self._v_sites_coords]
+                _, charges = self._fit_resp(vsites, [1 for i in vsites])
+                n_atoms = len(self._molecule.atoms)
+
+                for i in range(n_atoms):
+                    self._molecule.NonbondedForce[
+                        (i,)
+                    ].charge = charges[i]
+                for i, v_site in enumerate(self._v_sites_coords):
+                    self._v_sites_coords[i] = v_site[0], charges[i + n_atoms], v_site[2]
 
             if self._v_sites_coords:
                 self._save_virtual_sites()
@@ -194,6 +217,20 @@ class VirtualSites(StageBase):
         :return: distance between the two points
         """
         return np.linalg.norm(point1 - point2)
+
+    @staticmethod
+    def _monopole_esp(
+        charges: List[float], dists: List[float]
+    ) -> float:
+        """
+        Calculate the esp from a monopole with any number of charges, each a different distance from the point of measurement
+        :return: monopole esp value
+        """
+        assert len(charges) == len(dists)
+
+        return (
+            (ELECTRON_CHARGE * ELECTRON_CHARGE) / (4 * PI * VACUUM_PERMITTIVITY)
+        ) * sum([charges[i] / dists[i] for i in range(len(charges))])
 
     @staticmethod
     def _monopole_esp_one_charge(charge: float, dist: float) -> float:
@@ -347,6 +384,27 @@ class VirtualSites(StageBase):
 
         return sample_points
 
+    def _generate_sample_points_molecule(self) -> np.ndarray:
+        """
+        * Generate sample points for the whole molecule using _generate_sample_points_atom
+        * Filter points which are inside the molecular vdw sphere
+        :return: list of numpy arrays where each array is the xyz coordinates of a sample point.
+        """
+
+        def is_point_ok(point):
+            for atom_index, atom in enumerate(self._molecule.atoms):
+                atom = self._molecule.atoms[atom_index]
+                atom_coords = self._coords[atom_index]
+                vdw_radius = self._vdw_radii[atom.atomic_symbol]
+                if np.linalg.norm(point - atom_coords) < 1.4 * vdw_radius:
+                    return False
+            return True
+
+        sample_points = []
+        for atom_index in range(len(self._molecule.atoms)):
+            sample_points.extend(self._generate_sample_points_atom(atom_index))
+        return np.array(list(filter(is_point_ok, sample_points)))
+
     def _generate_esp_atom(self, atom_index: int) -> np.ndarray:
         """
         Using the multipole expansion, calculate the esp at each sample point around an atom.
@@ -395,6 +453,17 @@ class VirtualSites(StageBase):
             no_site_esps.append(v_total)
 
         return np.array(no_site_esps)
+
+    def _generate_esp_molecule(self) -> np.ndarray:
+        """
+        Using the multipole expansion, calculate the esp at each sample point around a molecule
+        :return: Ordered list of esp values at each sample point around the molecule.
+        """
+
+        no_site_esps = np.zeros(len(self._sample_points))
+        for atom_index, atom in enumerate(self._molecule.atoms):
+            no_site_esps += self._generate_esp_atom(atom_index)
+        return no_site_esps
 
     def _generate_atom_mono_esp_two_charges(
         self, atom_index: int, site_charge: float, site_coords: np.ndarray
@@ -678,6 +747,16 @@ class VirtualSites(StageBase):
             atom_index, q, q, site_a_coords, site_b_coords
         )
 
+    def _resp_objective_function(
+        self, lambdas: np.ndarray, atom_index: int, vecs: List[np.ndarray]
+    ) -> float:
+        """
+        Add n sites with charges qs along vectors vecs, scaled by lams.
+        return the sum of differences at each sample point between the ideal ESP and the calculated ESP.
+        """
+        error, _ = self._fit_resp(vecs, lambdas, atom_index)
+        return error * HA_TO_KCAL_P_MOL
+
     def _one_site_objective_function(
         self, q_lam: Tuple[float, float], atom_index: int, vec: np.ndarray
     ) -> float:
@@ -785,6 +864,39 @@ class VirtualSites(StageBase):
         When the sites are symmetric, they are stored under the same parameters, x[1]
         """
         return 1 - 2 * x[1] ** 2
+
+    def _fit_n_sites(self, atom_index: int, n_sites: int, alt: bool = False):
+        """
+        Fit method for n sites whose parent is <atom_index>
+        """
+        assert self.use_resp == True
+        vecs = self._get_vector_from_coords(atom_index, n_sites, alt)
+        if type(vecs) == np.ndarray:
+            vecs = [vecs]
+
+        bounds = tuple([(-1.0, 1.0) for i in range(n_sites)])
+        initial = np.ones(n_sites)
+        for i, vec in enumerate(vecs):
+            for vec_j in vecs[i + 1:]:
+                if (vec == vec_j).all():
+                    initial[i] /= 2
+
+        fit = minimize(
+            self._resp_objective_function,
+            initial,
+            args=(atom_index, vecs),
+            bounds=bounds
+        )
+
+        error = fit.fun
+        lambdas = fit.x
+        n_site_coords = [(
+                (vecs[i] * lambdas[i]) + self._coords[atom_index],
+                0,
+                atom_index
+        ) for i in range(n_sites)]
+
+        return error, n_site_coords
 
     def _fit_one_site(self, atom_index: int):
         """
@@ -967,16 +1079,28 @@ class VirtualSites(StageBase):
         """
 
         # Calc error in esp when no sites are present
-        vec = self._get_vector_from_coords(atom_index, n_sites=1)
-        no_site_error = self._one_site_objective_function((0, 0), atom_index, vec)
+        if self.use_resp:
+            no_site_error = self._resp_objective_function([], None, [])
+        else:
+            vec = self._get_vector_from_coords(atom_index, n_sites=1)
+            no_site_error = self._one_site_objective_function((0, 0), atom_index, vec)
 
         # Error in esp is sufficiently low to not require virtual sites.
         if no_site_error <= self.site_error_threshold:
             return
 
-        one_site_error, one_site_coords = self._fit_one_site(atom_index)
+        if self.use_resp:
+            one_site_error, one_site_coords = self._fit_n_sites(atom_index, 1)
+            two_site_error, two_site_coords = self._fit_n_sites(atom_index, 2)
+            two_site_error_alt, two_site_coords_alt = self._fit_n_sites(atom_index, 2, True)
 
-        two_site_error, two_site_coords = self._fit_two_sites(atom_index)
+            if two_site_error > two_site_error_alt:
+                two_site_error, two_site_coords = two_site_error_alt, two_site_coords_alt
+
+        else:
+            one_site_error, one_site_coords = self._fit_one_site(atom_index)
+
+            two_site_error, two_site_coords = self._fit_two_sites(atom_index)
 
         site_errors = {
             0: no_site_error,
@@ -1018,6 +1142,38 @@ class VirtualSites(StageBase):
                     f"No site error: {site_errors[0]: .4f}    One site error: {site_errors[1]: .4f}    Two sites error: {site_errors[2]: .4f}\n"
                 )
         self._plot(atom_index, site_errors, one_site_coords, two_site_coords)
+
+    def _fit_resp(self,
+            vectors: List[np.ndarray],
+            lambdas: List[float],
+            atom_index: int = None
+        ) -> Tuple[float, List[float]]:
+
+        points = np.hstack([
+            self._sample_points,
+            self._no_site_esps.reshape(-1, 1) / HA_TO_KCAL_P_MOL
+        ])
+
+        shift = np.zeros(3)
+        if atom_index is not None:
+            shift = self._coords[atom_index]
+
+        extra = []
+        for i in range(len(vectors)):
+            coord = vectors[i] * lambdas[i] + shift
+            for e in extra:
+                if np.isclose(e, coord).all():
+                    break
+            else:
+                extra.append(coord)
+
+        (_, charges), (_, error) = fit_charges(
+            [a.atomic_symbol for a in self._molecule.atoms],
+            self._coords,
+            sample_points=points,
+            extra=extra
+        )
+        return np.sqrt(error) / len(self._sample_points), charges
 
     def _plot(
         self,

@@ -14,6 +14,7 @@ from qubekit.charges import DDECCharges, ExtractChargeData
 from qubekit.forcefield import VirtualSite3Point, VirtualSite4Point
 from qubekit.molecules import Ligand
 from qubekit.nonbonded.protocols import cl_base, get_protocol
+from qubekit.nonbonded.virtual_sites import VirtualSites
 from qubekit.parametrisation import OpenFF
 from qubekit.utils.constants import BOHR_TO_ANGS
 from qubekit.utils.file_handling import get_data
@@ -99,6 +100,38 @@ def test_monopole_esp_one_charge_div_zero(vs):
     with pytest.raises(ZeroDivisionError):
         vs._monopole_esp_one_charge(1, 0)
 
+def test_resp(vs, mol):
+    vs._molecule = mol
+    vs._coords = mol.coordinates
+    vs._sample_points = vs._generate_sample_points_molecule()
+    vs._no_site_esps = vs._generate_esp_molecule()
+
+    charges = [a.aim.charge for a in vs._molecule.atoms]
+    error = sum([abs(VirtualSites._monopole_esp(charges,
+        [VirtualSites._xyz_distance(vs._coords[i], p)
+                for i in range(len(vs._molecule.atoms))],
+    ) - vs._no_site_esps[i]) for i, p in enumerate(vs._sample_points)]) \
+        / len(vs._sample_points)
+    assert vs._resp_objective_function([], None, []) < error
+
+def test_fit_charges(vs, mol):
+    vs._molecule = mol
+    vs._coords = mol.coordinates
+    vs._sample_points = vs._generate_sample_points_molecule()
+    vs._no_site_esps = vs._generate_esp_molecule()
+    no_site_error = vs._resp_objective_function([], None, [])
+
+    vs.use_resp = True
+    vs.site_error_threshold = 0.01
+    for atom_index, atom in enumerate(vs._molecule.atoms):
+        if len(atom.bonds) < 4:
+            one_site_error, one_site_coords = vs._fit_n_sites(atom_index, 1)
+            two_site_error, two_site_coords = vs._fit_n_sites(atom_index, 2)
+        else:
+            continue
+        assert one_site_error < no_site_error
+        assert two_site_error < no_site_error
+        assert two_site_error < one_site_error
 
 @pytest.mark.parametrize(
     "charge1, charge2, dist1, dist2, result",
@@ -214,6 +247,28 @@ def test_fit(mol, vs, tmpdir):
             == 0
         )
 
+def test_fit_resp(mol, vs, tmpdir):
+    vs.use_resp = True
+    vs.site_error_threshold = 0.01
+    vs.site_error_factor = 1.1
+
+    with tmpdir.as_cwd():
+        # make sure this is the reference value
+        assert mol.atoms[1].aim.charge == -0.183627
+        vs.run(molecule=mol)
+        # make sure we have a site
+        assert mol.extra_sites.n_sites == 2
+        # make sure only the parent site has its charge changed
+        with open('/home/lalex/charges.txt', 'w+') as f:
+            f.write('element,ddec,resp\n')
+            for a in mol.atoms:
+                f.write('%s,%f,%f\n' % (a.atomic_symbol, a.aim.charge, float(mol.NonbondedForce[(a.atom_index,)].charge)))
+
+        assert (
+            sum(param.charge for param in mol.NonbondedForce)
+            + sum(site.charge for site in mol.extra_sites)
+            == 0
+        )
 
 def test_refit(mol, vs, tmpdir):
     """Make sure restarting a vsite fit produces the same result and removes old sites."""
