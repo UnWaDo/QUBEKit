@@ -34,6 +34,8 @@ from qubekit.utils.constants import (
 from qubekit.utils.datastructures import StageBase
 from qubekit.utils.file_handling import folder_setup
 from qubekit.nonbonded.resp import fit_charges
+from qubekit.engines.multiwfn import SpaceFunctions
+from qubekit.nonbonded.rsf import select_atomic_points
 
 if TYPE_CHECKING:
     from qubekit.molecules import Ligand
@@ -66,6 +68,9 @@ class VirtualSites(StageBase):
     )
     use_resp: bool = Field(
         False, description="Use RESP procedure to determine charges instead of AIM analysis"
+    )
+    use_rsf: Literal[None, "ELF", "LOL", "Lap"] = Field(
+        None, description="Whether to use critical points of real-space function to locate virtual sites. Only applicable for ChargeMol charge analysis"
     )
     freeze_site_angles: bool = Field(
         True,
@@ -1089,7 +1094,11 @@ class VirtualSites(StageBase):
         if no_site_error <= self.site_error_threshold:
             return
 
-        if self.use_resp:
+        if self.use_rsf is not None:
+            one_site_error, two_site_error, one_site_coords, two_site_coords \
+                = self._fit_rsf(atom_index)
+
+        elif self.use_resp:
             one_site_error, one_site_coords = self._fit_n_sites(atom_index, 1)
             two_site_error, two_site_coords = self._fit_n_sites(atom_index, 2)
             two_site_error_alt, two_site_coords_alt = self._fit_n_sites(atom_index, 2, True)
@@ -1174,6 +1183,34 @@ class VirtualSites(StageBase):
             extra=extra
         )
         return np.sqrt(error) / len(self._sample_points), charges
+
+    def _fit_rsf(self, atom_index: int):
+        try:
+            one_site_coords = select_atomic_points(
+                "../../../charges/ChargeMol/%s.wfx" % self._molecule.name,
+                self._molecule.to_rdkit(), atom_index,
+                SpaceFunctions[self.use_rsf],
+                1, reuse=True
+            )
+            one_site_coords[0]
+
+        except Exception:
+            return 999.9, 999.9, \
+                [(np.zeros(3), 0, atom_index)], \
+                [(np.zeros(3), 0, atom_index) for i in range(2)]
+
+        two_site_coords = select_atomic_points(
+            "../../../charges/ChargeMol/%s.wfx" % self._molecule.name,
+            self._molecule.to_rdkit(), atom_index,
+            SpaceFunctions[self.use_rsf],
+            2, reuse=True
+        )
+
+        one_site_error, _ = self._fit_resp(one_site_coords, [1 for i in one_site_coords])
+        two_site_error, _ = self._fit_resp(two_site_coords, [1 for i in two_site_coords])
+        return one_site_error, two_site_error,  \
+            [(one_site_coords[0], 0, atom_index)], \
+            [(coord, 0, atom_index) for coord in two_site_coords]
 
     def _plot(
         self,
