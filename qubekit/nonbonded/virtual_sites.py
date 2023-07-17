@@ -1187,7 +1187,7 @@ class VirtualSites(StageBase):
     def _fit_rsf(self, atom_index: int):
         try:
             one_site_coords = select_atomic_points(
-                "../../../charges/ChargeMol/%s.wfx" % self._molecule.name,
+                "../../charges/{0}/ChargeMol_{0}/{0}.wfx".format(self._molecule.name),
                 self._molecule.to_rdkit(), atom_index,
                 SpaceFunctions[self.use_rsf],
                 1, reuse=True
@@ -1200,7 +1200,7 @@ class VirtualSites(StageBase):
                 [(np.zeros(3), 0, atom_index) for i in range(2)]
 
         two_site_coords = select_atomic_points(
-            "../../../charges/ChargeMol/%s.wfx" % self._molecule.name,
+            "../../charges/{0}/ChargeMol_{0}/{0}.wfx".format(self._molecule.name),
             self._molecule.to_rdkit(), atom_index,
             SpaceFunctions[self.use_rsf],
             2, reuse=True
