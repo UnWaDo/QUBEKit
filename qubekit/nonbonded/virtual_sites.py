@@ -1217,7 +1217,8 @@ class VirtualSites(StageBase):
             two_site_error, _ = self._fit_resp(coords, [1 for i in coords])
 
         except Exception as e:
-            print("Error while fitting OSCs by real-space-functions: %s" % repr(e))
+            print("Error while fitting atom #%02d virtual sites by real-space-functions: %s" % (
+                atom_index, repr(e)))
         return one_site_error, two_site_error,  \
             one_site_coords, two_site_coords
 
