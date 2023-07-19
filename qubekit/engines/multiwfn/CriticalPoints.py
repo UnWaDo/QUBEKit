@@ -40,7 +40,7 @@ MWFN_CPS_RETURN = '0\n'
 MWFN_RETURN = '-10\n'
 MWFN_EXIT = 'q\n'
 
-MWFN_EXECUTABLE = '/home/lalex/QC/Multiwfn_3.8/Multiwfn'
+MWFN_EXECUTABLE = 'Multiwfn'
 
 
 class SpaceFunctions(Enum):

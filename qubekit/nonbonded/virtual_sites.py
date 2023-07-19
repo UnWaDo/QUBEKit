@@ -1185,32 +1185,41 @@ class VirtualSites(StageBase):
         return np.sqrt(error) / len(self._sample_points), charges
 
     def _fit_rsf(self, atom_index: int):
+        one_site_error = 999.0
+        two_site_error = 999.0
+        one_site_coords = [(np.zeros(3), 0, atom_index)]
+        two_site_coords = [(np.zeros(3), 0, atom_index) for i in range(2)]
+
         try:
-            one_site_coords = select_atomic_points(
+            mol = self._molecule.to_rdkit()
+            conformer = mol.GetConformer()
+            for i, c in enumerate(self._coords):
+                conformer.SetAtomPosition(i, c)
+
+            coords = select_atomic_points(
                 "../../charges/{0}/ChargeMol_{0}/{0}.wfx".format(self._molecule.name),
-                self._molecule.to_rdkit(), atom_index,
+                mol, atom_index,
                 SpaceFunctions[self.use_rsf],
                 1, reuse=True
             )
-            one_site_coords[0]
 
-        except Exception:
-            return 999.9, 999.9, \
-                [(np.zeros(3), 0, atom_index)], \
-                [(np.zeros(3), 0, atom_index) for i in range(2)]
+            one_site_coords = [(coords[0], 0, atom_index)]
+            one_site_error, _ = self._fit_resp(coords, [1 for i in coords])
 
-        two_site_coords = select_atomic_points(
-            "../../charges/{0}/ChargeMol_{0}/{0}.wfx".format(self._molecule.name),
-            self._molecule.to_rdkit(), atom_index,
-            SpaceFunctions[self.use_rsf],
-            2, reuse=True
-        )
+            coords = select_atomic_points(
+                "../../charges/{0}/ChargeMol_{0}/{0}.wfx".format(self._molecule.name),
+                mol, atom_index,
+                SpaceFunctions[self.use_rsf],
+                2, reuse=True
+            )
 
-        one_site_error, _ = self._fit_resp(one_site_coords, [1 for i in one_site_coords])
-        two_site_error, _ = self._fit_resp(two_site_coords, [1 for i in two_site_coords])
+            two_site_coords = [(coords[i], 0, atom_index) for i in range(2)]
+            two_site_error, _ = self._fit_resp(coords, [1 for i in coords])
+
+        except Exception as e:
+            print("Error while fitting OSCs by real-space-functions: %s" % repr(e))
         return one_site_error, two_site_error,  \
-            [(one_site_coords[0], 0, atom_index)], \
-            [(coord, 0, atom_index) for coord in two_site_coords]
+            one_site_coords, two_site_coords
 
     def _plot(
         self,
